@@ -24,13 +24,13 @@
     "test:watch": "pnpm rebuild better-sqlite3 && vitest"
   },
   "dependencies": {
+    "@base-ui/react": "^1.6.0",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.21.0",
-    "radix-ui": "^1.6.0",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
