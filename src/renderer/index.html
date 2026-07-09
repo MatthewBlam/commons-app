@@ -1,17 +1,16 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <title>Commons</title>
     <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.cohere.com http://localhost:11434; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:"
-    />
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' https://api.cohere.com http://localhost:11434; font-src 'self'; img-src 'self' data:" />
   </head>
 
-  <body>
-    <div id="root"></div>
+  <body class="relative">
+    <div id="root" class="isolate relative flex min-h-svh flex-col"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

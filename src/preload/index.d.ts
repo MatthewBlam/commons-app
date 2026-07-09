@@ -1,8 +1,54 @@
-import { ElectronAPI } from '@electron-toolkit/preload'
+export {};
+
+interface CommonsAPI {
+  saveSecret(key: string, value: string): Promise<void>;
+  loadSecret(key: string): Promise<string | null>;
+  validateCohereKey(key: string): Promise<{ valid: boolean }>;
+  checkOllama(): Promise<{ available: boolean; models: string[] }>;
+  getEmbeddingProvider(): Promise<string>;
+  setEmbeddingProvider(provider: string): Promise<void>;
+  openExternal(url: string): Promise<void>;
+  search(query: string): Promise<import("../shared/types").SearchResponse>;
+  startNotionOAuth(): Promise<{ workspaceName: string }>;
+  cancelNotionOAuth(): Promise<void>;
+  listNotionPages(
+    parentPageId?: string,
+  ): Promise<import("../shared/types").NotionItemSummary[]>;
+  startGoogleOAuth(): Promise<{ email: string }>;
+  cancelGoogleOAuth(): Promise<void>;
+  listDriveItems(
+    parentId?: string,
+  ): Promise<import("../shared/types").DriveItemSummary[]>;
+  listDocumentsBySource(
+    sourceId: string,
+  ): Promise<import("../shared/types").Document[]>;
+  listSources(): Promise<
+    (import("../shared/types").Source & { documentCount: number })[]
+  >;
+  addSource(
+    config: import("../shared/types").SourceConfig,
+  ): Promise<import("../shared/types").Source>;
+  removeSource(id: string): Promise<void>;
+  syncSource(sourceId: string): Promise<void>;
+  onSyncProgress(
+    callback: (progress: import("../shared/types").SyncProgress) => void,
+  ): () => void;
+  cancelSync(sourceId: string): Promise<void>;
+  getStorageStats(): Promise<import("../shared/types").StorageStats>;
+  clearAllData(): Promise<void>;
+  checkEmbeddingHealth(): Promise<import("../shared/types").EmbeddingHealth>;
+  deleteSecret(key: string): Promise<void>;
+}
+
+interface ElectronDrag {
+  startDrag(): void;
+  dragging(): void;
+  stopDrag(): void;
+}
 
 declare global {
   interface Window {
-    electron: ElectronAPI
-    api: unknown
+    api: CommonsAPI;
+    electronDrag: ElectronDrag;
   }
 }

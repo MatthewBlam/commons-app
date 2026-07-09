@@ -1,22 +1,83 @@
-import { contextBridge } from 'electron'
-import { electronAPI } from '@electron-toolkit/preload'
+import { contextBridge, ipcRenderer } from "electron";
 
-// Custom APIs for renderer
-const api = {}
+const api = {
+  saveSecret: (key: string, value: string): Promise<void> =>
+    ipcRenderer.invoke("secrets:save", key, value),
+  loadSecret: (key: string): Promise<string | null> =>
+    ipcRenderer.invoke("secrets:load", key),
+  validateCohereKey: (key: string): Promise<{ valid: boolean }> =>
+    ipcRenderer.invoke("auth:validate-cohere", key),
+  checkOllama: (): Promise<{ available: boolean; models: string[] }> =>
+    ipcRenderer.invoke("auth:check-ollama"),
+  getEmbeddingProvider: (): Promise<string> =>
+    ipcRenderer.invoke("settings:get-embedding-provider"),
+  setEmbeddingProvider: (provider: string): Promise<void> =>
+    ipcRenderer.invoke("settings:set-embedding-provider", provider),
+  openExternal: (url: string): Promise<void> =>
+    ipcRenderer.invoke("app:open-external", url),
+  search: (query: string): Promise<import("../shared/types").SearchResponse> =>
+    ipcRenderer.invoke("search:query", query),
+  startNotionOAuth: (): Promise<{ workspaceName: string }> =>
+    ipcRenderer.invoke("auth:notion-oauth-start"),
+  cancelNotionOAuth: (): Promise<void> =>
+    ipcRenderer.invoke("auth:notion-oauth-cancel"),
+  listNotionPages: (
+    parentPageId?: string,
+  ): Promise<import("../shared/types").NotionItemSummary[]> =>
+    ipcRenderer.invoke("notion:list-pages", parentPageId),
+  startGoogleOAuth: (): Promise<{ email: string }> =>
+    ipcRenderer.invoke("auth:google-oauth-start"),
+  cancelGoogleOAuth: (): Promise<void> =>
+    ipcRenderer.invoke("auth:google-oauth-cancel"),
+  listDriveItems: (
+    parentId?: string,
+  ): Promise<import("../shared/types").DriveItemSummary[]> =>
+    ipcRenderer.invoke("drive:list-items", parentId),
+  listDocumentsBySource: (
+    sourceId: string,
+  ): Promise<import("../shared/types").Document[]> =>
+    ipcRenderer.invoke("documents:list-by-source", sourceId),
+  listSources: (): Promise<
+    (import("../shared/types").Source & { documentCount: number })[]
+  > => ipcRenderer.invoke("sources:list"),
+  addSource: (
+    config: import("../shared/types").SourceConfig,
+  ): Promise<import("../shared/types").Source> =>
+    ipcRenderer.invoke("sources:add", config),
+  removeSource: (id: string): Promise<void> =>
+    ipcRenderer.invoke("sources:remove", id),
+  syncSource: (sourceId: string): Promise<void> =>
+    ipcRenderer.invoke("sync:start", sourceId),
+  onSyncProgress: (
+    callback: (progress: import("../shared/types").SyncProgress) => void,
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      progress: import("../shared/types").SyncProgress,
+    ): void => {
+      callback(progress);
+    };
+    ipcRenderer.on("sync:progress", handler);
+    return () => {
+      ipcRenderer.removeListener("sync:progress", handler);
+    };
+  },
+  cancelSync: (sourceId: string): Promise<void> =>
+    ipcRenderer.invoke("sync:cancel", sourceId),
+  getStorageStats: (): Promise<import("../shared/types").StorageStats> =>
+    ipcRenderer.invoke("app:storage-stats"),
+  clearAllData: (): Promise<void> => ipcRenderer.invoke("app:clear-all-data"),
+  checkEmbeddingHealth: (): Promise<
+    import("../shared/types").EmbeddingHealth
+  > => ipcRenderer.invoke("embedding:health"),
+  deleteSecret: (key: string): Promise<void> =>
+    ipcRenderer.invoke("secrets:delete", key),
+};
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
-if (process.contextIsolated) {
-  try {
-    contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
-  } catch (error) {
-    console.error(error)
-  }
-} else {
-  // @ts-ignore (define in dts)
-  window.electron = electronAPI
-  // @ts-ignore (define in dts)
-  window.api = api
-}
+contextBridge.exposeInMainWorld("api", api);
+
+contextBridge.exposeInMainWorld("electronDrag", {
+  startDrag: (): void => ipcRenderer.send("window:start-drag"),
+  dragging: (): void => ipcRenderer.send("window:dragging"),
+  stopDrag: (): void => ipcRenderer.send("window:stop-drag"),
+});

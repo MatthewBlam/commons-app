@@ -247,13 +247,13 @@ The app can send the top retrieved chunks to a local model and ask it to answer 
 
 ### Suggested Local Models
 
-| Model | Why Use It |
-|---|---|
-| `llama3.2:3b` | Good lightweight default for laptops |
-| `gemma3:4b` | Good small model option |
-| `qwen2.5:7b` | Stronger quality if hardware can handle it |
-| `mistral:7b` | Solid general local model |
-| `phi4-mini` | Lightweight model for constrained machines |
+| Model         | Why Use It                                 |
+| ------------- | ------------------------------------------ |
+| `llama3.2:3b` | Good lightweight default for laptops       |
+| `gemma3:4b`   | Good small model option                    |
+| `qwen2.5:7b`  | Stronger quality if hardware can handle it |
+| `mistral:7b`  | Solid general local model                  |
+| `phi4-mini`   | Lightweight model for constrained machines |
 
 ### Local Model Prompt Pattern
 
@@ -475,13 +475,13 @@ Use Google Drive API with folder selection.
 
 ### Supported File Types for MVP
 
-| File Type | Handling |
-|---|---|
-| Google Docs | Export as text or HTML |
-| PDF | Extract text with PDF parser |
-| DOCX | Extract with Mammoth |
-| TXT | Read directly |
-| Markdown | Read directly |
+| File Type   | Handling                     |
+| ----------- | ---------------------------- |
+| Google Docs | Export as text or HTML       |
+| PDF         | Extract text with PDF parser |
+| DOCX        | Extract with Mammoth         |
+| TXT         | Read directly                |
+| Markdown    | Read directly                |
 
 ### OAuth Scope Preference
 

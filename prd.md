@@ -56,21 +56,21 @@ Install app → Paste Cohere API key (or choose Ollama) → Connect Notion and/o
 
 ### Stack
 
-| Layer | Choice | Notes |
-|-------|--------|-------|
-| Framework | Electron v42+ via electron-vite 5.x | Scaffolded with `npm create electron-vite@latest` |
-| Frontend | React + Tailwind CSS v4 + Coss UI | Copy-paste components built on Base UI primitives. Install via `pnpm dlx shadcn@latest add @coss/ui` |
-| Local DB | better-sqlite3 v12.10+ | Native module, needs @electron/rebuild |
-| Vector search | Brute-force cosine similarity in JS | Over embeddings stored as BLOBs in SQLite |
-| Embeddings | Cohere Embed v4 (1536 dims) / Ollama | cohere-ai SDK v8.x (pin exact version) |
-| Reranking | Cohere Rerank v4.0-pro | Skipped in Ollama-only mode |
-| Secure storage | Electron safeStorage (async API) | Replaces deprecated keytar |
-| Notion | @notionhq/client v5.22+ | OAuth + paste-token fallback |
-| Google Drive | googleapis + google-auth-library | Loopback OAuth, drive.file scope |
-| PDF parsing | pdf-parse v2.4+ | |
-| DOCX parsing | mammoth v1.12+ | |
-| Packaging | electron-forge | Official Electron packager. auto-unpack-natives plugin handles better-sqlite3. DMG (macOS) + Squirrel (Windows) |
-| Distribution | GitHub Releases | Manual download |
+| Layer          | Choice                               | Notes                                                                                                           |
+| -------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Framework      | Electron v42+ via electron-vite 5.x  | Scaffolded with `npm create electron-vite@latest`                                                               |
+| Frontend       | React + Tailwind CSS v4 + Coss UI    | Copy-paste components built on Base UI primitives. Install via `pnpm dlx shadcn@latest add @coss/ui`            |
+| Local DB       | better-sqlite3 v12.10+               | Native module, needs @electron/rebuild                                                                          |
+| Vector search  | Brute-force cosine similarity in JS  | Over embeddings stored as BLOBs in SQLite                                                                       |
+| Embeddings     | Cohere Embed v4 (1536 dims) / Ollama | cohere-ai SDK v8.x (pin exact version)                                                                          |
+| Reranking      | Cohere Rerank v4.0-pro               | Skipped in Ollama-only mode                                                                                     |
+| Secure storage | Electron safeStorage (async API)     | Replaces deprecated keytar                                                                                      |
+| Notion         | @notionhq/client v5.22+              | OAuth + paste-token fallback                                                                                    |
+| Google Drive   | googleapis + google-auth-library     | Loopback OAuth, drive.file scope                                                                                |
+| PDF parsing    | pdf-parse v2.4+                      |                                                                                                                 |
+| DOCX parsing   | mammoth v1.12+                       |                                                                                                                 |
+| Packaging      | electron-forge                       | Official Electron packager. auto-unpack-natives plugin handles better-sqlite3. DMG (macOS) + Squirrel (Windows) |
+| Distribution   | GitHub Releases                      | Manual download                                                                                                 |
 
 ### Project Structure
 
@@ -258,11 +258,11 @@ CREATE TABLE settings (
 
 For a typical club with ~100 docs, ~1,000 chunks:
 
-| Operation | Tokens | Cost |
-|-----------|--------|------|
-| Initial embed (1,000 chunks) | ~200K tokens | ~$0.024 |
-| Per query (embed + rerank) | ~500 + ~20K tokens | ~$0.04 |
-| 100 queries/month | | ~$4.00 |
+| Operation                    | Tokens             | Cost    |
+| ---------------------------- | ------------------ | ------- |
+| Initial embed (1,000 chunks) | ~200K tokens       | ~$0.024 |
+| Per query (embed + rerank)   | ~500 + ~20K tokens | ~$0.04  |
+| 100 queries/month            |                    | ~$4.00  |
 
 Trial key (1,000 calls/month) works for testing. Production key recommended for real use — pay-as-you-go, pennies per month for a typical club.
 

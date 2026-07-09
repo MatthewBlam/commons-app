@@ -1,13 +1,13 @@
-import { defineConfig } from 'vitest/config'
-import { resolve } from 'path'
+import { defineConfig } from "vitest/config";
+import { resolve } from "path";
 
 export default defineConfig({
   test: {
-    include: ['src/**/__tests__/**/*.test.ts'],
+    include: ["src/**/__tests__/**/*.test.{ts,tsx}"],
   },
   resolve: {
     alias: {
-      '@renderer': resolve('src/renderer/src'),
+      "@renderer": resolve("src/renderer/src"),
     },
   },
-})
+});

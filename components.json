@@ -3,6 +3,13 @@
   "style": "base-nova",
   "rsc": false,
   "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/renderer/src/index.css",
+    "baseColor": "neutral",
+    "cssVariables": true
+  },
+  "iconLibrary": "lucide",
   "aliases": {
     "components": "@renderer/components",
     "utils": "@renderer/lib/utils",
@@ -10,11 +17,7 @@
     "lib": "@renderer/lib",
     "hooks": "@renderer/hooks"
   },
-  "iconLibrary": "lucide",
-  "tailwind": {
-    "config": "",
-    "css": "src/renderer/src/index.css",
-    "baseColor": "neutral",
-    "cssVariables": true
+  "registries": {
+    "@coss": "https://coss.com/ui/r/{name}.json"
   }
 }

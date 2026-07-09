@@ -1,0 +1,277 @@
+import { app, ipcMain, shell } from "electron";
+import { join } from "node:path";
+import { stat } from "node:fs/promises";
+import { getDb } from "../db/singleton";
+import { saveSecret, loadSecret, deleteSecret } from "../auth/storage";
+import {
+  getSetting,
+  upsertSetting,
+  getAllSourcesWithCounts,
+  insertSource,
+  deleteSource,
+  getSourceByProviderAndRoot,
+  getDocumentsBySourceId,
+  getStorageStats,
+  clearAllData,
+  getEmbeddingHealth,
+  getChunkCountByModel,
+} from "../db/database";
+import { search } from "../search/searcher";
+import { startNotionOAuth, cancelNotionOAuth } from "../auth/notion-oauth";
+import { listNotionItems } from "../connectors/notion";
+import {
+  startGoogleOAuth,
+  cancelGoogleOAuth,
+  getAuthenticatedClient,
+  refreshIfNeeded,
+} from "../auth/google-oauth";
+import { listDriveItems } from "../connectors/drive";
+import { getEmbeddingModelName } from "../search/embedder";
+import type { EmbedConfig } from "../search/embedder";
+import type { SourceConfig } from "../../shared/types";
+
+const ALLOWED_SECRET_KEYS = new Set([
+  "cohere_api_key",
+  "notion_token",
+  "google_tokens",
+]);
+
+function isSafeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+export function registerIpcHandlers(): void {
+  ipcMain.handle("secrets:save", (_, key: string, value: string) => {
+    if (!ALLOWED_SECRET_KEYS.has(key))
+      throw new Error(`Unknown secret key: ${key}`);
+    saveSecret(getDb(), key, value);
+  });
+
+  ipcMain.handle("secrets:load", (_, key: string) => {
+    if (!ALLOWED_SECRET_KEYS.has(key))
+      throw new Error(`Unknown secret key: ${key}`);
+    return loadSecret(getDb(), key);
+  });
+
+  ipcMain.handle("secrets:delete", (_, key: string) => {
+    if (!ALLOWED_SECRET_KEYS.has(key))
+      throw new Error(`Unknown secret key: ${key}`);
+    deleteSecret(getDb(), key);
+  });
+
+  ipcMain.handle("auth:validate-cohere", async (_, apiKey: string) => {
+    try {
+      const res = await fetch("https://api.cohere.com/v2/embed", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "embed-v4.0",
+          texts: ["test"],
+          input_type: "search_query",
+          embedding_types: ["float"],
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      return { valid: res.ok };
+    } catch {
+      return { valid: false };
+    }
+  });
+
+  ipcMain.handle("auth:check-ollama", async () => {
+    try {
+      const res = await fetch("http://localhost:11434/api/tags", {
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return { available: false, models: [] };
+      const data = (await res.json()) as { models?: { name: string }[] };
+      return { available: true, models: data.models?.map((m) => m.name) ?? [] };
+    } catch {
+      return { valid: false, models: [] };
+    }
+  });
+
+  ipcMain.handle("settings:get-embedding-provider", () => {
+    return getSetting(getDb(), "embedding_provider") ?? "cohere";
+  });
+
+  ipcMain.handle("settings:set-embedding-provider", (_, provider: string) => {
+    upsertSetting(getDb(), "embedding_provider", provider);
+  });
+
+  ipcMain.handle("app:open-external", async (_, url: string) => {
+    if (!isSafeUrl(url)) return;
+    await shell.openExternal(url);
+  });
+
+  ipcMain.handle("auth:notion-oauth-start", async () => {
+    const clientId = process.env.NOTION_CLIENT_ID;
+    const clientSecret = process.env.NOTION_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        "Notion OAuth credentials not configured. Set NOTION_CLIENT_ID and NOTION_CLIENT_SECRET environment variables.",
+      );
+    }
+    const result = await startNotionOAuth(clientId, clientSecret);
+    saveSecret(getDb(), "notion_token", result.accessToken);
+    return { workspaceName: result.workspaceName };
+  });
+
+  ipcMain.handle("auth:notion-oauth-cancel", () => {
+    cancelNotionOAuth();
+  });
+
+  ipcMain.handle("notion:list-pages", async (_, parentPageId?: string) => {
+    const token = loadSecret(getDb(), "notion_token");
+    if (!token)
+      throw new Error("Notion is not connected. Please authenticate first.");
+    return listNotionItems(token, parentPageId);
+  });
+
+  ipcMain.handle("auth:google-oauth-start", async () => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        "Google OAuth credentials not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.",
+      );
+    }
+    const result = await startGoogleOAuth(clientId, clientSecret, getDb());
+    return { email: result.email };
+  });
+
+  ipcMain.handle("auth:google-oauth-cancel", () => {
+    cancelGoogleOAuth();
+  });
+
+  ipcMain.handle("drive:list-items", async (_, parentId?: string) => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        "Google OAuth credentials not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.",
+      );
+    }
+    const db = getDb();
+    const client = getAuthenticatedClient(db, clientId, clientSecret);
+    await refreshIfNeeded(client, db);
+    return listDriveItems(client, parentId);
+  });
+
+  ipcMain.handle("search:query", async (_, query: string) => {
+    const db = getDb();
+    const provider = (getSetting(db, "embedding_provider") ?? "cohere") as
+      | "cohere"
+      | "ollama";
+
+    const embedConfig: EmbedConfig = {
+      provider,
+      apiKey: loadSecret(db, "cohere_api_key") ?? undefined,
+      ollamaModel: getSetting(db, "ollama_model") ?? undefined,
+    };
+
+    return search(db, query, embedConfig);
+  });
+
+  ipcMain.handle("sources:list", () => {
+    return getAllSourcesWithCounts(getDb());
+  });
+
+  ipcMain.handle("documents:list-by-source", (_, sourceId: string) => {
+    return getDocumentsBySourceId(getDb(), sourceId);
+  });
+
+  ipcMain.handle("sources:add", (_, config: SourceConfig) => {
+    const db = getDb();
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+
+    const provider = config.provider === "notion" ? "notion" : "google_drive";
+    const rootExternalId =
+      config.provider === "notion" ? config.rootPageId : config.folderId;
+    if (getSourceByProviderAndRoot(db, provider, rootExternalId)) {
+      throw new Error("This source is already connected.");
+    }
+
+    if (config.provider === "notion") {
+      insertSource(db, {
+        id,
+        provider: "notion",
+        name: config.name,
+        rootExternalId: config.rootPageId,
+        createdAt: now,
+      });
+    } else {
+      insertSource(db, {
+        id,
+        provider: "google_drive",
+        name: config.folderName,
+        rootExternalId: config.folderId,
+        createdAt: now,
+      });
+    }
+
+    return {
+      id,
+      provider: config.provider,
+      name: config.provider === "notion" ? config.name : config.folderName,
+      rootExternalId:
+        config.provider === "notion" ? config.rootPageId : config.folderId,
+      createdAt: now,
+    };
+  });
+
+  ipcMain.handle("sources:remove", (_, id: string) => {
+    deleteSource(getDb(), id);
+  });
+
+  ipcMain.handle("app:storage-stats", async () => {
+    const db = getDb();
+    const stats = getStorageStats(db);
+    const dbPath = join(app.getPath("userData"), "commons.db");
+    let dbSizeBytes = 0;
+    try {
+      dbSizeBytes = (await stat(dbPath)).size;
+    } catch {
+      // file may not exist yet
+    }
+    return { ...stats, dbSizeBytes };
+  });
+
+  ipcMain.handle("app:clear-all-data", () => {
+    clearAllData(getDb());
+  });
+
+  ipcMain.handle("embedding:health", () => {
+    const db = getDb();
+    const health = getEmbeddingHealth(db);
+    const provider = (getSetting(db, "embedding_provider") ?? "cohere") as
+      | "cohere"
+      | "ollama";
+    const embedConfig: EmbedConfig = {
+      provider,
+      ollamaModel: getSetting(db, "ollama_model") ?? undefined,
+    };
+    const currentModel = getEmbeddingModelName(embedConfig);
+
+    const matchedCount = health.distinctModels.includes(currentModel)
+      ? getChunkCountByModel(db, currentModel)
+      : 0;
+    const mismatchedChunks = health.totalChunks - matchedCount;
+
+    return {
+      provider,
+      model: currentModel,
+      mismatchedChunks,
+      totalChunks: health.totalChunks,
+    };
+  });
+}

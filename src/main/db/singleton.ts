@@ -1,23 +1,47 @@
-import Database from 'better-sqlite3'
-import { app } from 'electron'
-import { join } from 'node:path'
-import { runMigrations } from './migrations'
+import Database from "better-sqlite3";
+import { app } from "electron";
+import { join } from "node:path";
+import { existsSync, copyFileSync, renameSync } from "node:fs";
+import { runMigrations } from "./migrations";
 
-let _db: Database.Database | null = null
+let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
-  if (_db) return _db
-  const dbPath = join(app.getPath('userData'), 'commons.db')
-  _db = new Database(dbPath)
-  _db.pragma('journal_mode = WAL')
-  _db.pragma('foreign_keys = ON')
-  runMigrations(_db)
-  return _db
+  if (_db) return _db;
+  const dbPath = join(app.getPath("userData"), "commons.db");
+
+  try {
+    _db = new Database(dbPath);
+  } catch (err) {
+    console.error("Database open failed, attempting corruption recovery:", err);
+    const backupPath = `${dbPath}.corrupt.bak`;
+    try {
+      renameSync(dbPath, backupPath);
+    } catch {
+      // backup rename failed — file may not exist
+    }
+    _db = new Database(dbPath);
+  }
+
+  _db.pragma("journal_mode = WAL");
+  _db.pragma("foreign_keys = ON");
+  _db.pragma("busy_timeout = 5000");
+
+  if (existsSync(dbPath)) {
+    try {
+      copyFileSync(dbPath, `${dbPath}.pre-migration.bak`);
+    } catch {
+      // non-fatal — best-effort backup
+    }
+  }
+
+  runMigrations(_db);
+  return _db;
 }
 
 export function closeDb(): void {
   if (_db) {
-    _db.close()
-    _db = null
+    _db.close();
+    _db = null;
   }
 }

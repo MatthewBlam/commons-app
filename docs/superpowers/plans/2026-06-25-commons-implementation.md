@@ -4,9 +4,9 @@
 
 **Goal:** Build a local-first Electron desktop app that lets student clubs connect Notion and Google Drive docs, index them locally with Cohere embeddings, and search across everything with reranking.
 
-**Architecture:** Electron main process handles all backend work (SQLite, API calls, OAuth, embeddings, search). React renderer communicates via typed IPC channels through a preload context bridge. Cosine similarity runs in a Node worker thread to avoid blocking the UI. Sync is manual (user-triggered), fetch → extract → chunk → embed → store pipeline.
+**Architecture:** Electron main process handles all backend work (SQLite, API calls, OAuth, embeddings, search). React renderer communicates via typed IPC channels through a preload context bridge. Cosine similarity runs inline in the main process (~10-15ms for ~2,000 chunks, no worker needed at this scale). Sync is manual (user-triggered), fetch → extract → chunk → embed → store pipeline.
 
-**Tech Stack:** Electron 42+ via electron-vite 2 (ESM), React + Tailwind CSS v4 + Coss UI, better-sqlite3, Cohere Embed v4 + Rerank v4.0-pro, @notionhq/client, googleapis, pdf-parse, mammoth, electron-forge.
+**Tech Stack:** Electron 42+ via electron-vite 2 (ESM), React + Tailwind CSS v4 + Coss UI, better-sqlite3, Cohere Embed v4 + Rerank v3.5, @notionhq/client, googleapis, pdf-parse, mammoth, electron-forge.
 
 ## Global Constraints
 
@@ -14,12 +14,12 @@
 - **ESM-only:** `"type": "module"` in package.json, all configs use ESM syntax
 - **electron-vite scaffold:** `npm create @quick-start/electron@latest` (NOT `npm create electron-vite@latest`)
 - **Tailwind v4:** Use `@tailwindcss/vite` plugin, `@import "tailwindcss"` (NOT `@tailwind` directives)
-- **Cohere SDK:** `cohere-ai` pinned to exact version. Use `CohereClientV2` with `client.embed()` / `client.rerank()` directly
-- **Cohere Embed model:** `embed-v4.0`, 1536 dimensions default, `inputType: 'search_document'` for docs, `'search_query'` for queries, max 96 texts per batch
-- **Cohere Rerank model:** `rerank-v4.0-pro`
+- **Cohere API:** Raw `fetch` against `https://api.cohere.com/v2/` — no SDK dependency. Params are snake_case: `input_type`, `embedding_types`.
+- **Cohere Embed model:** `embed-v4.0`, 1536 dimensions default, `input_type: 'search_document'` for docs, `'search_query'` for queries, max 96 texts per batch
+- **Cohere Rerank model:** `rerank-v3.5`
 - **Google Drive scope:** `drive.readonly` (NOT `drive.file` — too narrow to list folder contents)
 - **Notion OAuth:** Fixed port loopback only (e.g., `http://localhost:21337/callback`). Random ports are rejected. Custom protocol schemes don't work.
-- **Secure storage:** Electron `safeStorage` async API (`encryptStringAsync`/`decryptStringAsync`). NOT keytar.
+- **Secure storage:** Electron `safeStorage` sync API (`encryptString`/`decryptString`). NOT keytar. Async variants aren't exposed in Electron 39's TypeScript types.
 - **SQLite pragmas:** `journal_mode = WAL`, `foreign_keys = ON`
 - **Platforms:** macOS (DMG) + Windows (Squirrel) only. No Linux for MVP.
 
@@ -28,11 +28,11 @@
 These were found during technology research and are incorporated into the plan:
 
 1. **`drive.file` → `drive.readonly`** — `drive.file` only grants access to files the app created. Cannot list arbitrary user folders. `drive.readonly` is a sensitive scope (requires Google app verification for >100 users, 2-6 week process), but works immediately for development.
-2. **Cohere SDK client** — Use `CohereClientV2` (calls `client.embed()` directly) not `CohereClient` (which requires `client.v2.embed()`). Params are camelCase: `inputType`, `embeddingTypes`, `outputDimension`.
+2. **Cohere API (no SDK)** — Use raw `fetch` against `https://api.cohere.com/v2/embed` and `/v2/rerank`. Params are snake_case: `input_type`, `embedding_types`. Avoids a dependency; consistent with the existing `auth:validate-cohere` handler.
 3. **electron-vite v2 is ESM-only** — Config files must be ESM. Package.json needs `"type": "module"`.
 4. **Scaffold command** — `npm create @quick-start/electron@latest`, not `npm create electron-vite@latest`.
 5. **Notion OAuth** — Fixed port (e.g., 21337) must be pre-registered. Port 21337 is arbitrary but uncommon enough to avoid conflicts.
-6. **Cosine similarity** — Must run in a worker thread, not the main process, to avoid UI freezes.
+6. **Cosine similarity** — Runs inline in the main process. For ~2,000 chunks at 1536 dimensions, cosine sim takes ~10-15ms — fast enough without a worker thread. Can add a worker later if profiling shows it's needed at larger scale.
 7. **Missing from PRD:** OAuth token refresh, embedding model mismatch detection, database migrations, chunk overlap, Content Security Policy.
 
 ## IPC API Surface
@@ -42,34 +42,34 @@ The preload context bridge exposes this typed API to the renderer:
 ```typescript
 interface CommonsAPI {
   // Auth
-  saveSecret(key: string, value: string): Promise<void>
-  loadSecret(key: string): Promise<string | null>
-  validateCohereKey(key: string): Promise<boolean>
-  checkOllama(): Promise<{ available: boolean; models: string[] }>
-  startNotionOAuth(): Promise<{ token: string; workspaceName: string }>
-  saveNotionToken(token: string): Promise<void>
-  startGoogleOAuth(): Promise<void>
+  saveSecret(key: string, value: string): Promise<void>;
+  loadSecret(key: string): Promise<string | null>;
+  validateCohereKey(key: string): Promise<boolean>;
+  checkOllama(): Promise<{ available: boolean; models: string[] }>;
+  startNotionOAuth(): Promise<{ token: string; workspaceName: string }>;
+  saveNotionToken(token: string): Promise<void>;
+  startGoogleOAuth(): Promise<void>;
 
   // Sources
-  listSources(): Promise<Source[]>
-  addSource(provider: string, config: SourceConfig): Promise<Source>
-  removeSource(id: string): Promise<void>
+  listSources(): Promise<Source[]>;
+  addSource(provider: string, config: SourceConfig): Promise<Source>;
+  removeSource(id: string): Promise<void>;
 
   // Sync
-  syncSource(sourceId: string): Promise<void>
-  onSyncProgress(callback: (progress: SyncProgress) => void): () => void
-  cancelSync(sourceId: string): Promise<void>
+  syncSource(sourceId: string): Promise<void>;
+  onSyncProgress(callback: (progress: SyncProgress) => void): () => void;
+  cancelSync(sourceId: string): Promise<void>;
 
   // Search
-  search(query: string): Promise<SearchResult[]>
-  checkEmbeddingHealth(): Promise<EmbeddingHealth>
+  search(query: string): Promise<SearchResult[]>;
+  checkEmbeddingHealth(): Promise<EmbeddingHealth>;
 
   // App
-  getStorageStats(): Promise<StorageStats>
-  clearAllData(): Promise<void>
-  openExternal(url: string): Promise<void>
-  getEmbeddingProvider(): Promise<'cohere' | 'ollama'>
-  setEmbeddingProvider(provider: 'cohere' | 'ollama'): Promise<void>
+  getStorageStats(): Promise<StorageStats>;
+  clearAllData(): Promise<void>;
+  openExternal(url: string): Promise<void>;
+  getEmbeddingProvider(): Promise<"cohere" | "ollama">;
+  setEmbeddingProvider(provider: "cohere" | "ollama"): Promise<void>;
 }
 ```
 
@@ -78,12 +78,14 @@ interface CommonsAPI {
 ## Task 1: Project Scaffold + Database Layer
 
 **Files:**
+
 - Create: `package.json`, `electron.vite.config.ts`, `src/main/index.ts`, `src/preload/index.ts`, `src/renderer/index.html`, `src/renderer/src/main.tsx`, `src/renderer/src/App.tsx`, `src/renderer/src/index.css`
 - Create: `src/main/db/database.ts`, `src/main/db/migrations.ts`
 - Create: `src/shared/types.ts`
 - Test: `src/main/db/__tests__/database.test.ts`, `src/main/db/__tests__/migrations.test.ts`
 
 **Interfaces:**
+
 - Produces: `getDb(): BetterSqlite3.Database`, `runMigrations(db)`, typed query helpers (`insertSource`, `insertDocument`, `upsertChunks`, `getChunksBySourceId`, `upsertSetting`, `getSetting`, `deleteSource`)
 - Produces: All shared TypeScript types (`Source`, `Document`, `Chunk`, `SyncProgress`, `SearchResult`, etc.)
 
@@ -106,6 +108,7 @@ pnpm add -D @types/better-sqlite3 @electron/rebuild
 ```
 
 Add to `package.json` scripts:
+
 ```json
 "postinstall": "electron-rebuild"
 ```
@@ -119,19 +122,24 @@ pnpm add -D tailwindcss @tailwindcss/vite
 In `electron.vite.config.ts`, add the Tailwind plugin to the renderer config only:
 
 ```typescript
-import tailwindcss from '@tailwindcss/vite'
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
-  main: { /* ... */ },
-  preload: { /* ... */ },
+  main: {
+    /* ... */
+  },
+  preload: {
+    /* ... */
+  },
   renderer: {
     plugins: [react(), tailwindcss()],
     // ...
-  }
-})
+  },
+});
 ```
 
 Replace contents of `src/renderer/src/index.css`:
+
 ```css
 @import "tailwindcss";
 ```
@@ -153,9 +161,12 @@ Configure fonts in `src/renderer/src/index.css` (add Inter import via CSS `@impo
 - [ ] **Step 5: Set Content Security Policy**
 
 In `src/renderer/index.html`, add:
+
 ```html
-<meta http-equiv="Content-Security-Policy"
-  content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.cohere.com http://localhost:11434; font-src 'self' https://fonts.gstatic.com">
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.cohere.com http://localhost:11434; font-src 'self' https://fonts.gstatic.com"
+/>
 ```
 
 - [ ] **Step 6: Write shared types**
@@ -164,74 +175,74 @@ Create `src/shared/types.ts` with all domain types:
 
 ```typescript
 export interface Source {
-  id: string
-  provider: 'notion' | 'google_drive'
-  name: string
-  rootExternalId: string
-  createdAt: string
+  id: string;
+  provider: "notion" | "google_drive";
+  name: string;
+  rootExternalId: string;
+  createdAt: string;
 }
 
 export interface Document {
-  id: string
-  sourceId: string
-  provider: string
-  externalId: string
-  title: string
-  url: string | null
-  mimeType: string | null
-  modifiedAt: string | null
-  contentHash: string | null
-  lastSyncedAt: string | null
-  syncStatus: 'pending' | 'synced' | 'error'
+  id: string;
+  sourceId: string;
+  provider: string;
+  externalId: string;
+  title: string;
+  url: string | null;
+  mimeType: string | null;
+  modifiedAt: string | null;
+  contentHash: string | null;
+  lastSyncedAt: string | null;
+  syncStatus: "pending" | "synced" | "error";
 }
 
 export interface Chunk {
-  id: string
-  documentId: string
-  chunkIndex: number
-  heading: string | null
-  text: string
-  embedding: Buffer | null
-  embeddingModel: string | null
-  tokenCount: number | null
-  createdAt: string
+  id: string;
+  documentId: string;
+  chunkIndex: number;
+  heading: string | null;
+  text: string;
+  embedding: Buffer | null;
+  embeddingModel: string | null;
+  tokenCount: number | null;
+  createdAt: string;
 }
 
 export interface SearchResult {
-  documentTitle: string
-  snippet: string
-  heading: string | null
-  url: string | null
-  provider: string
-  score: number
+  documentTitle: string;
+  snippet: string;
+  heading: string | null;
+  url: string | null;
+  provider: string;
+  score: number;
 }
 
 export interface SyncProgress {
-  sourceId: string
-  phase: 'fetching' | 'extracting' | 'chunking' | 'embedding' | 'storing'
-  current: number
-  total: number
-  currentDocTitle: string | null
-  errors: string[]
+  sourceId: string;
+  phase: "fetching" | "extracting" | "chunking" | "embedding" | "storing";
+  current: number;
+  total: number;
+  currentDocTitle: string | null;
+  errors: string[];
 }
 
 export interface EmbeddingHealth {
-  provider: 'cohere' | 'ollama'
-  model: string
-  mismatchedChunks: number
-  totalChunks: number
+  provider: "cohere" | "ollama";
+  model: string;
+  mismatchedChunks: number;
+  totalChunks: number;
 }
 
 export interface StorageStats {
-  sourceCount: number
-  documentCount: number
-  chunkCount: number
-  dbSizeBytes: number
+  sourceCount: number;
+  documentCount: number;
+  chunkCount: number;
+  dbSizeBytes: number;
 }
 
 export type SourceConfig =
-  | { provider: 'notion'; rootPageId: string; name: string }
-  | { provider: 'google_drive'; folderId: string; folderName: string }
+  | { provider: "notion"; rootPageId: string; name: string }
+  | { provider: "google_drive"; folderId: string; folderName: string };
 ```
 
 - [ ] **Step 7: Write failing tests for database and migrations**
@@ -239,90 +250,114 @@ export type SourceConfig =
 Create `src/main/db/__tests__/database.test.ts`:
 
 ```typescript
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import Database from 'better-sqlite3'
-import { runMigrations } from '../migrations'
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import Database from "better-sqlite3";
+import { runMigrations } from "../migrations";
 import {
-  insertSource, getSourceById, deleteSource,
-  insertDocument, getDocumentsBySourceId,
-  upsertChunks, getChunksByDocumentId,
-  upsertSetting, getSetting
-} from '../database'
+  insertSource,
+  getSourceById,
+  deleteSource,
+  insertDocument,
+  getDocumentsBySourceId,
+  upsertChunks,
+  getChunksByDocumentId,
+  upsertSetting,
+  getSetting,
+} from "../database";
 
-describe('migrations', () => {
-  let db: Database.Database
+describe("migrations", () => {
+  let db: Database.Database;
 
   beforeEach(() => {
-    db = new Database(':memory:')
-    db.pragma('journal_mode = WAL')
-    db.pragma('foreign_keys = ON')
-  })
+    db = new Database(":memory:");
+    db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
+  });
 
-  afterEach(() => db.close())
+  afterEach(() => db.close());
 
-  it('creates all tables on fresh database', () => {
-    runMigrations(db)
-    const tables = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ).all() as { name: string }[]
-    const names = tables.map(t => t.name)
-    expect(names).toContain('sources')
-    expect(names).toContain('documents')
-    expect(names).toContain('chunks')
-    expect(names).toContain('settings')
-    expect(names).toContain('schema_version')
-  })
+  it("creates all tables on fresh database", () => {
+    runMigrations(db);
+    const tables = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+      )
+      .all() as { name: string }[];
+    const names = tables.map((t) => t.name);
+    expect(names).toContain("sources");
+    expect(names).toContain("documents");
+    expect(names).toContain("chunks");
+    expect(names).toContain("settings");
+    expect(names).toContain("schema_version");
+  });
 
-  it('is idempotent — running twice does not error', () => {
-    runMigrations(db)
-    runMigrations(db)
-  })
+  it("is idempotent — running twice does not error", () => {
+    runMigrations(db);
+    runMigrations(db);
+  });
 
-  it('cascades deletes from sources to documents and chunks', () => {
-    runMigrations(db)
+  it("cascades deletes from sources to documents and chunks", () => {
+    runMigrations(db);
     insertSource(db, {
-      id: 's1', provider: 'notion', name: 'Test',
-      rootExternalId: 'ext1', createdAt: new Date().toISOString()
-    })
+      id: "s1",
+      provider: "notion",
+      name: "Test",
+      rootExternalId: "ext1",
+      createdAt: new Date().toISOString(),
+    });
     insertDocument(db, {
-      id: 'd1', sourceId: 's1', provider: 'notion',
-      externalId: 'e1', title: 'Doc 1', url: null,
-      mimeType: null, modifiedAt: null, contentHash: null,
-      lastSyncedAt: null, syncStatus: 'synced'
-    })
-    upsertChunks(db, [{
-      id: 'c1', documentId: 'd1', chunkIndex: 0,
-      heading: null, text: 'hello', embedding: null,
-      embeddingModel: null, tokenCount: 1,
-      createdAt: new Date().toISOString()
-    }])
+      id: "d1",
+      sourceId: "s1",
+      provider: "notion",
+      externalId: "e1",
+      title: "Doc 1",
+      url: null,
+      mimeType: null,
+      modifiedAt: null,
+      contentHash: null,
+      lastSyncedAt: null,
+      syncStatus: "synced",
+    });
+    upsertChunks(db, [
+      {
+        id: "c1",
+        documentId: "d1",
+        chunkIndex: 0,
+        heading: null,
+        text: "hello",
+        embedding: null,
+        embeddingModel: null,
+        tokenCount: 1,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
 
-    deleteSource(db, 's1')
+    deleteSource(db, "s1");
 
-    expect(getDocumentsBySourceId(db, 's1')).toHaveLength(0)
-    expect(getChunksByDocumentId(db, 'd1')).toHaveLength(0)
-  })
-})
+    expect(getDocumentsBySourceId(db, "s1")).toHaveLength(0);
+    expect(getChunksByDocumentId(db, "d1")).toHaveLength(0);
+  });
+});
 
-describe('settings', () => {
-  let db: Database.Database
+describe("settings", () => {
+  let db: Database.Database;
   beforeEach(() => {
-    db = new Database(':memory:')
-    runMigrations(db)
-  })
-  afterEach(() => db.close())
+    db = new Database(":memory:");
+    runMigrations(db);
+  });
+  afterEach(() => db.close());
 
-  it('round-trips a setting value', () => {
-    upsertSetting(db, 'embedding_provider', 'cohere')
-    expect(getSetting(db, 'embedding_provider')).toBe('cohere')
-  })
+  it("round-trips a setting value", () => {
+    upsertSetting(db, "embedding_provider", "cohere");
+    expect(getSetting(db, "embedding_provider")).toBe("cohere");
+  });
 
-  it('upserts existing setting', () => {
-    upsertSetting(db, 'key', 'v1')
-    upsertSetting(db, 'key', 'v2')
-    expect(getSetting(db, 'key')).toBe('v2')
-  })
-})
+  it("upserts existing setting", () => {
+    upsertSetting(db, "key", "v1");
+    upsertSetting(db, "key", "v2");
+    expect(getSetting(db, "key")).toBe("v2");
+  });
+});
 ```
 
 Run: `pnpm vitest run src/main/db/__tests__/database.test.ts`
@@ -333,11 +368,11 @@ Expected: FAIL — modules don't exist yet.
 Create `src/main/db/migrations.ts`:
 
 ```typescript
-import type Database from 'better-sqlite3'
+import type Database from "better-sqlite3";
 
 interface Migration {
-  version: number
-  statements: string[]
+  version: number;
+  statements: string[];
 }
 
 const migrations: Migration[] = [
@@ -384,34 +419,35 @@ const migrations: Migration[] = [
       `CREATE UNIQUE INDEX idx_documents_external ON documents(source_id, external_id)`,
     ],
   },
-]
+];
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
-  )`)
+  )`);
 
-  const current = db.prepare(
-    'SELECT MAX(version) as v FROM schema_version'
-  ).get() as { v: number | null }
-  const currentVersion = current?.v ?? 0
+  const current = db
+    .prepare("SELECT MAX(version) as v FROM schema_version")
+    .get() as {
+    v: number | null;
+  };
+  const currentVersion = current?.v ?? 0;
 
-  const pending = migrations.filter(m => m.version > currentVersion)
-  if (pending.length === 0) return
+  const pending = migrations.filter((m) => m.version > currentVersion);
+  if (pending.length === 0) return;
 
   const applyAll = db.transaction(() => {
     for (const migration of pending) {
       for (const sql of migration.statements) {
-        db.exec(sql)
+        db.exec(sql);
       }
-      db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
-        migration.version,
-        new Date().toISOString()
-      )
+      db.prepare(
+        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+      ).run(migration.version, new Date().toISOString());
     }
-  })
-  applyAll()
+  });
+  applyAll();
 }
 ```
 
@@ -420,31 +456,46 @@ export function runMigrations(db: Database.Database): void {
 Create `src/main/db/database.ts` with `getDb()` singleton and all query helpers. Key pattern:
 
 ```typescript
-import Database from 'better-sqlite3'
-import { app } from 'electron'
-import { join } from 'node:path'
-import { runMigrations } from './migrations'
+import Database from "better-sqlite3";
+import { app } from "electron";
+import { join } from "node:path";
+import { runMigrations } from "./migrations";
 
-let _db: Database.Database | null = null
+let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
-  if (_db) return _db
-  const dbPath = join(app.getPath('userData'), 'commons.db')
-  _db = new Database(dbPath)
-  _db.pragma('journal_mode = WAL')
-  _db.pragma('foreign_keys = ON')
-  runMigrations(_db)
-  return _db
+  if (_db) return _db;
+  const dbPath = join(app.getPath("userData"), "commons.db");
+  _db = new Database(dbPath);
+  _db.pragma("journal_mode = WAL");
+  _db.pragma("foreign_keys = ON");
+  runMigrations(_db);
+  return _db;
 }
 
-export function insertSource(db: Database.Database, source: { id: string; provider: string; name: string; rootExternalId: string; createdAt: string }): void {
-  db.prepare('INSERT INTO sources (id, provider, name, root_external_id, created_at) VALUES (?, ?, ?, ?, ?)').run(
-    source.id, source.provider, source.name, source.rootExternalId, source.createdAt
-  )
+export function insertSource(
+  db: Database.Database,
+  source: {
+    id: string;
+    provider: string;
+    name: string;
+    rootExternalId: string;
+    createdAt: string;
+  },
+): void {
+  db.prepare(
+    "INSERT INTO sources (id, provider, name, root_external_id, created_at) VALUES (?, ?, ?, ?, ?)",
+  ).run(
+    source.id,
+    source.provider,
+    source.name,
+    source.rootExternalId,
+    source.createdAt,
+  );
 }
 
 export function deleteSource(db: Database.Database, id: string): void {
-  db.prepare('DELETE FROM sources WHERE id = ?').run(id)
+  db.prepare("DELETE FROM sources WHERE id = ?").run(id);
 }
 
 // ... remaining helpers follow same pattern for documents, chunks, settings
@@ -459,14 +510,24 @@ Implement `upsertChunks` as a transaction for batch insert:
 export function upsertChunks(db: Database.Database, chunks: ChunkRow[]): void {
   const insert = db.prepare(
     `INSERT OR REPLACE INTO chunks (id, document_id, chunk_index, heading, text, embedding, embedding_model, token_count, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
   const batch = db.transaction((items: ChunkRow[]) => {
     for (const c of items) {
-      insert.run(c.id, c.documentId, c.chunkIndex, c.heading, c.text, c.embedding, c.embeddingModel, c.tokenCount, c.createdAt)
+      insert.run(
+        c.id,
+        c.documentId,
+        c.chunkIndex,
+        c.heading,
+        c.text,
+        c.embedding,
+        c.embeddingModel,
+        c.tokenCount,
+        c.createdAt,
+      );
     }
-  })
-  batch(chunks)
+  });
+  batch(chunks);
 }
 ```
 
@@ -498,6 +559,7 @@ git commit -m "feat: scaffold project with electron-vite, SQLite, Tailwind v4, a
 ## Task 2: Secure Storage + API Key Setup UI
 
 **Files:**
+
 - Create: `src/main/auth/storage.ts`
 - Create: `src/main/ipc/handlers.ts`
 - Modify: `src/preload/index.ts` — add context bridge
@@ -508,6 +570,7 @@ git commit -m "feat: scaffold project with electron-vite, SQLite, Tailwind v4, a
 - Test: `src/main/auth/__tests__/storage.test.ts`
 
 **Interfaces:**
+
 - Consumes: `upsertSetting`, `getSetting` from Task 1
 - Produces: `saveSecret(key, plaintext)`, `loadSecret(key): string | null`, `deleteSecret(key)`
 - Produces: IPC channels `secrets:save`, `secrets:load`, `auth:validate-cohere`, `auth:check-ollama`
@@ -517,66 +580,76 @@ git commit -m "feat: scaffold project with electron-vite, SQLite, Tailwind v4, a
 - [ ] **Step 1: Write failing test for secure storage**
 
 ```typescript
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock safeStorage since tests don't run inside Electron
-vi.mock('electron', () => ({
+vi.mock("electron", () => ({
   safeStorage: {
     isEncryptionAvailable: () => true,
     encryptStringAsync: async (text: string) => Buffer.from(`enc:${text}`),
-    decryptStringAsync: async (buf: Buffer) => buf.toString().replace('enc:', ''),
-  }
-}))
+    decryptStringAsync: async (buf: Buffer) =>
+      buf.toString().replace("enc:", ""),
+  },
+}));
 
-import { saveSecret, loadSecret, deleteSecret } from '../storage'
+import { saveSecret, loadSecret, deleteSecret } from "../storage";
 
-describe('SecureStorage', () => {
+describe("SecureStorage", () => {
   // Uses in-memory DB from test setup
-  it('round-trips a secret', async () => {
-    await saveSecret(db, 'test_key', 'my-secret')
-    const result = await loadSecret(db, 'test_key')
-    expect(result).toBe('my-secret')
-  })
+  it("round-trips a secret", async () => {
+    await saveSecret(db, "test_key", "my-secret");
+    const result = await loadSecret(db, "test_key");
+    expect(result).toBe("my-secret");
+  });
 
-  it('returns null for missing key', async () => {
-    const result = await loadSecret(db, 'nonexistent')
-    expect(result).toBeNull()
-  })
+  it("returns null for missing key", async () => {
+    const result = await loadSecret(db, "nonexistent");
+    expect(result).toBeNull();
+  });
 
-  it('deletes a secret', async () => {
-    await saveSecret(db, 'test_key', 'my-secret')
-    deleteSecret(db, 'test_key')
-    const result = await loadSecret(db, 'test_key')
-    expect(result).toBeNull()
-  })
-})
+  it("deletes a secret", async () => {
+    await saveSecret(db, "test_key", "my-secret");
+    deleteSecret(db, "test_key");
+    const result = await loadSecret(db, "test_key");
+    expect(result).toBeNull();
+  });
+});
 ```
 
 - [ ] **Step 2: Implement secure storage**
 
 ```typescript
 // src/main/auth/storage.ts
-import { safeStorage } from 'electron'
-import type Database from 'better-sqlite3'
+import { safeStorage } from "electron";
+import type Database from "better-sqlite3";
 
-export async function saveSecret(db: Database.Database, key: string, plaintext: string): Promise<void> {
-  const encrypted = await safeStorage.encryptStringAsync(plaintext)
-  const blob = Buffer.from(encrypted)
-  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+export async function saveSecret(
+  db: Database.Database,
+  key: string,
+  plaintext: string,
+): Promise<void> {
+  const encrypted = await safeStorage.encryptStringAsync(plaintext);
+  const blob = Buffer.from(encrypted);
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(
     key,
-    blob.toString('base64')
-  )
+    blob.toString("base64"),
+  );
 }
 
-export async function loadSecret(db: Database.Database, key: string): Promise<string | null> {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined
-  if (!row) return null
-  const buf = Buffer.from(row.value, 'base64')
-  return safeStorage.decryptStringAsync(buf)
+export async function loadSecret(
+  db: Database.Database,
+  key: string,
+): Promise<string | null> {
+  const row = db
+    .prepare("SELECT value FROM settings WHERE key = ?")
+    .get(key) as { value: string } | undefined;
+  if (!row) return null;
+  const buf = Buffer.from(row.value, "base64");
+  return safeStorage.decryptStringAsync(buf);
 }
 
 export function deleteSecret(db: Database.Database, key: string): void {
-  db.prepare('DELETE FROM settings WHERE key = ?').run(key)
+  db.prepare("DELETE FROM settings WHERE key = ?").run(key);
 }
 ```
 
@@ -585,62 +658,67 @@ export function deleteSecret(db: Database.Database, key: string): void {
 `src/main/ipc/handlers.ts` — register all IPC handlers:
 
 ```typescript
-import { ipcMain } from 'electron'
-import { CohereClientV2 } from 'cohere-ai'
-import { getDb } from '../db/database'
-import { saveSecret, loadSecret, deleteSecret } from '../auth/storage'
+import { ipcMain } from "electron";
+import { CohereClientV2 } from "cohere-ai";
+import { getDb } from "../db/database";
+import { saveSecret, loadSecret, deleteSecret } from "../auth/storage";
 
 export function registerIpcHandlers(): void {
-  const db = getDb()
+  const db = getDb();
 
-  ipcMain.handle('secrets:save', async (_, key: string, value: string) => {
-    await saveSecret(db, key, value)
-  })
+  ipcMain.handle("secrets:save", async (_, key: string, value: string) => {
+    await saveSecret(db, key, value);
+  });
 
-  ipcMain.handle('secrets:load', async (_, key: string) => {
-    return loadSecret(db, key)
-  })
+  ipcMain.handle("secrets:load", async (_, key: string) => {
+    return loadSecret(db, key);
+  });
 
-  ipcMain.handle('auth:validate-cohere', async (_, apiKey: string) => {
+  ipcMain.handle("auth:validate-cohere", async (_, apiKey: string) => {
     try {
-      const client = new CohereClientV2({ token: apiKey })
+      const client = new CohereClientV2({ token: apiKey });
       await client.embed({
-        model: 'embed-v4.0',
-        texts: ['test'],
-        inputType: 'search_query',
-        embeddingTypes: ['float'],
-      })
-      return { valid: true }
+        model: "embed-v4.0",
+        texts: ["test"],
+        inputType: "search_query",
+        embeddingTypes: ["float"],
+      });
+      return { valid: true };
     } catch {
-      return { valid: false }
+      return { valid: false };
     }
-  })
+  });
 
-  ipcMain.handle('auth:check-ollama', async () => {
+  ipcMain.handle("auth:check-ollama", async () => {
     try {
-      const res = await fetch('http://localhost:11434/api/tags')
-      if (!res.ok) return { available: false, models: [] }
-      const data = await res.json()
-      return { available: true, models: data.models?.map((m: any) => m.name) ?? [] }
+      const res = await fetch("http://localhost:11434/api/tags");
+      if (!res.ok) return { available: false, models: [] };
+      const data = await res.json();
+      return {
+        available: true,
+        models: data.models?.map((m: any) => m.name) ?? [],
+      };
     } catch {
-      return { available: false, models: [] }
+      return { available: false, models: [] };
     }
-  })
+  });
 }
 ```
 
 `src/preload/index.ts` — expose API to renderer:
 
 ```typescript
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer } from "electron";
 
-contextBridge.exposeInMainWorld('api', {
-  saveSecret: (key: string, value: string) => ipcRenderer.invoke('secrets:save', key, value),
-  loadSecret: (key: string) => ipcRenderer.invoke('secrets:load', key),
-  validateCohereKey: (key: string) => ipcRenderer.invoke('auth:validate-cohere', key),
-  checkOllama: () => ipcRenderer.invoke('auth:check-ollama'),
+contextBridge.exposeInMainWorld("api", {
+  saveSecret: (key: string, value: string) =>
+    ipcRenderer.invoke("secrets:save", key, value),
+  loadSecret: (key: string) => ipcRenderer.invoke("secrets:load", key),
+  validateCohereKey: (key: string) =>
+    ipcRenderer.invoke("auth:validate-cohere", key),
+  checkOllama: () => ipcRenderer.invoke("auth:check-ollama"),
   // ... more channels added in later tasks
-})
+});
 ```
 
 Call `registerIpcHandlers()` in `src/main/index.ts` after app ready.
@@ -674,14 +752,17 @@ git commit -m "feat: add secure storage, IPC bridge, and API key setup UI"
 ## Task 3: Text Chunker
 
 **Files:**
+
 - Create: `src/main/search/chunker.ts`
 - Test: `src/main/search/__tests__/chunker.test.ts`
 
 **Interfaces:**
+
 - Produces: `chunkText(text: string, title: string): ChunkData[]`
 - `ChunkData = { index: number, heading: string | null, text: string, tokenCount: number }`
 
 **Implementation details:**
+
 1. Split text on heading patterns (`# `, `## `, `### `, etc., or `\n\n` double-newlines as fallback)
 2. Each section becomes a chunk candidate
 3. If a section exceeds 400 tokens, split at sentence boundaries (`. `, `? `, `! `)
@@ -696,34 +777,34 @@ git commit -m "feat: add secure storage, IPC bridge, and API key setup UI"
 Test cases: document with headings, flat document (no headings), single huge paragraph, empty string, document where one section exceeds max tokens.
 
 ```typescript
-describe('chunkText', () => {
-  it('splits on markdown headings', () => {
-    const text = '# Intro\nHello world\n## Details\nMore info here'
-    const chunks = chunkText(text, 'Test Doc')
-    expect(chunks.length).toBe(2)
-    expect(chunks[0].heading).toBe('Intro')
-    expect(chunks[1].heading).toBe('Details')
-  })
+describe("chunkText", () => {
+  it("splits on markdown headings", () => {
+    const text = "# Intro\nHello world\n## Details\nMore info here";
+    const chunks = chunkText(text, "Test Doc");
+    expect(chunks.length).toBe(2);
+    expect(chunks[0].heading).toBe("Intro");
+    expect(chunks[1].heading).toBe("Details");
+  });
 
-  it('splits oversized sections at sentence boundaries with overlap', () => {
-    const longText = Array(200).fill('This is a sentence.').join(' ')
-    const chunks = chunkText(`# Big Section\n${longText}`, 'Test')
-    expect(chunks.length).toBeGreaterThan(1)
+  it("splits oversized sections at sentence boundaries with overlap", () => {
+    const longText = Array(200).fill("This is a sentence.").join(" ");
+    const chunks = chunkText(`# Big Section\n${longText}`, "Test");
+    expect(chunks.length).toBeGreaterThan(1);
     // Verify overlap: end of chunk N appears at start of chunk N+1
-    const endOfFirst = chunks[0].text.slice(-50)
-    expect(chunks[1].text.startsWith(endOfFirst.trim())).toBe(true)
-  })
+    const endOfFirst = chunks[0].text.slice(-50);
+    expect(chunks[1].text.startsWith(endOfFirst.trim())).toBe(true);
+  });
 
-  it('returns empty array for empty string', () => {
-    expect(chunkText('', 'Empty')).toHaveLength(0)
-  })
+  it("returns empty array for empty string", () => {
+    expect(chunkText("", "Empty")).toHaveLength(0);
+  });
 
-  it('handles document with no headings', () => {
-    const text = 'Paragraph one.\n\nParagraph two.\n\nParagraph three.'
-    const chunks = chunkText(text, 'Flat Doc')
-    expect(chunks.length).toBeGreaterThan(0)
-  })
-})
+  it("handles document with no headings", () => {
+    const text = "Paragraph one.\n\nParagraph two.\n\nParagraph three.";
+    const chunks = chunkText(text, "Flat Doc");
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+});
 ```
 
 - [ ] **Step 2: Implement chunker**
@@ -739,69 +820,98 @@ git commit -m "feat: add text chunker with heading-aware splitting and overlap"
 ## Task 4: Embedding Service
 
 **Files:**
+
 - Create: `src/main/search/embedder.ts`
 - Test: `src/main/search/__tests__/embedder.test.ts`
 
 **Interfaces:**
+
 - Consumes: Cohere API key from secure storage
-- Produces: `embedDocuments(texts: string[], provider: 'cohere' | 'ollama'): Promise<Float32Array[]>`
-- Produces: `embedQuery(text: string, provider: 'cohere' | 'ollama'): Promise<Float32Array>`
-- Produces: `getEmbeddingModelName(provider: 'cohere' | 'ollama'): string`
+- Produces: `EmbedConfig = { provider: 'cohere' | 'ollama', apiKey?: string, ollamaModel?: string }`
+- Produces: `embedDocuments(texts: string[], config: EmbedConfig): Promise<Float32Array[]>`
+- Produces: `embedQuery(text: string, config: EmbedConfig): Promise<Float32Array>`
+- Produces: `getEmbeddingModelName(config: EmbedConfig): string`
+- Produces: `embeddingToBuffer(embedding: Float32Array): Buffer`, `bufferToEmbedding(buf: Buffer): Float32Array`
 
 **Implementation details:**
 
-Cohere path:
-```typescript
-import { CohereClientV2 } from 'cohere-ai'
+Uses raw `fetch` for both Cohere and Ollama (no SDK dependency). All config is passed via an `EmbedConfig` object. Ollama model defaults to `nomic-embed-text` if not specified; the caller (sync manager) reads the user's preferred model from settings and passes it in.
 
-async function embedWithCohere(texts: string[], inputType: 'search_document' | 'search_query', apiKey: string): Promise<Float32Array[]> {
-  const client = new CohereClientV2({ token: apiKey })
-  const results: Float32Array[] = []
+Cohere path:
+
+```typescript
+async function embedWithCohere(
+  texts: string[],
+  inputType: "search_document" | "search_query",
+  apiKey: string,
+): Promise<Float32Array[]> {
+  const results: Float32Array[] = [];
 
   // Batch in groups of 96 (Cohere limit)
   for (let i = 0; i < texts.length; i += 96) {
-    const batch = texts.slice(i, i + 96)
-    const response = await client.embed({
-      model: 'embed-v4.0',
-      texts: batch,
-      inputType,
-      embeddingTypes: ['float'],
-    })
-    for (const emb of response.embeddings.float!) {
-      results.push(new Float32Array(emb))
+    const batch = texts.slice(i, i + 96);
+    const res = await fetch("https://api.cohere.com/v2/embed", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "embed-v4.0",
+        texts: batch,
+        input_type: inputType,
+        embedding_types: ["float"],
+      }),
+    });
+    if (!res.ok)
+      throw new Error(`Cohere embed failed: ${res.status} ${res.statusText}`);
+    const data = await res.json();
+    for (const emb of data.embeddings.float) {
+      results.push(new Float32Array(emb));
     }
   }
-  return results
+  return results;
 }
 ```
 
 Ollama path:
+
 ```typescript
-async function embedWithOllama(texts: string[], model: string): Promise<Float32Array[]> {
-  const response = await fetch('http://localhost:11434/api/embed', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+async function embedWithOllama(
+  texts: string[],
+  model: string,
+): Promise<Float32Array[]> {
+  const res = await fetch("http://localhost:11434/api/embed", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model, input: texts }),
-  })
-  const data = await response.json()
-  return data.embeddings.map((e: number[]) => new Float32Array(e))
+  });
+  if (!res.ok)
+    throw new Error(`Ollama embed failed: ${res.status} ${res.statusText}`);
+  const data = await res.json();
+  return data.embeddings.map((e: number[]) => new Float32Array(e));
 }
 ```
 
 Float32Array → Buffer for SQLite storage:
+
 ```typescript
 function embeddingToBuffer(embedding: Float32Array): Buffer {
-  return Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength)
+  return Buffer.from(
+    embedding.buffer,
+    embedding.byteOffset,
+    embedding.byteLength,
+  );
 }
 
 function bufferToEmbedding(buf: Buffer): Float32Array {
-  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
 }
 ```
 
 **Steps:**
 
-- [ ] **Step 1: Write failing tests** — mock Cohere client, test batch splitting at 96, test Float32Array ↔ Buffer round-trip, test Ollama HTTP call
+- [ ] **Step 1: Write failing tests** — mock `fetch`, test batch splitting at 96, test Float32Array ↔ Buffer round-trip, test Ollama HTTP call
 - [ ] **Step 2: Implement embedder**
 - [ ] **Step 3: Run tests, verify pass**
 - [ ] **Step 4: Manual test** — with a real Cohere key, embed a test string and verify 1536-dim output
@@ -816,90 +926,107 @@ git commit -m "feat: add embedding service with Cohere v4 and Ollama support"
 ## Task 5: Search Engine (Cosine Similarity + Rerank)
 
 **Files:**
-- Create: `src/main/search/search.worker.ts` — worker thread for cosine similarity
-- Create: `src/main/search/searcher.ts` — orchestrates search pipeline
+
+- Create: `src/main/search/searcher.ts` — orchestrates search pipeline with inline cosine similarity
 - Create: `src/main/search/reranker.ts` — Cohere Rerank wrapper
-- Test: `src/main/search/__tests__/searcher.test.ts`, `src/main/search/__tests__/search.worker.test.ts`
+- Modify: `src/main/db/database.ts` — add `getDocumentById()`
+- Modify: `src/main/ipc/handlers.ts` — add `search:query` channel
+- Modify: `src/preload/index.ts`, `src/preload/index.d.ts` — add `search` to preload bridge
+- Test: `src/main/search/__tests__/searcher.test.ts`, `src/main/search/__tests__/reranker.test.ts`
 
 **Interfaces:**
-- Consumes: `getChunksWithEmbeddings()` from Task 1, `embedQuery()` from Task 4
-- Produces: `search(query: string): Promise<SearchResult[]>`
+
+- Consumes: `getChunksWithEmbeddings()` from Task 1, `getDocumentById()` from Task 1, `embedQuery()` + `bufferToEmbedding()` from Task 4
+- Produces: `search(db, query, embedConfig, cohereApiKey?): Promise<SearchResult[]>`
 
 **Implementation details:**
 
-Worker thread (`search.worker.ts`):
+Cosine similarity (inline in `searcher.ts`, no worker thread):
+
 ```typescript
-import { parentPort } from 'node:worker_threads'
-
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  let dot = 0, normA = 0, normB = 0
+export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  let dot = 0,
+    normA = 0,
+    normB = 0;
   for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
   }
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB))
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
-
-parentPort?.on('message', (msg: {
-  queryEmbedding: ArrayBuffer
-  chunks: { id: string; embedding: ArrayBuffer }[]
-  topK: number
-}) => {
-  const query = new Float32Array(msg.queryEmbedding)
-  const scored = msg.chunks.map(c => ({
-    id: c.id,
-    score: cosineSimilarity(query, new Float32Array(c.embedding)),
-  }))
-  scored.sort((a, b) => b.score - a.score)
-  parentPort?.postMessage(scored.slice(0, msg.topK))
-})
 ```
 
 Searcher orchestration:
-1. Embed query via `embedQuery()`
-2. Load all chunk embeddings from DB
-3. Send to worker, get top 40 by cosine similarity
-4. If Cohere available: rerank top 40 → return top 8
-5. If Ollama-only: return top 8 from cosine similarity directly
-6. Join with document metadata for final results
 
-Reranker (`reranker.ts`):
+1. Embed query via `embedQuery(query, embedConfig)`
+2. Load all chunk embeddings from DB via `getChunksWithEmbeddings(db)`
+3. Compute cosine similarity inline, get top 40
+4. If `cohereApiKey` provided: rerank top 40 → return top 8
+5. If no Cohere key (Ollama-only): return top 8 from cosine similarity directly
+6. Look up document metadata via `getDocumentById()` for each result
+7. Map to `SearchResult[]`
+
+Reranker (`reranker.ts`) — raw `fetch`, no SDK:
+
 ```typescript
-import { CohereClientV2 } from 'cohere-ai'
-
 export async function rerank(
   query: string,
   candidates: { id: string; text: string }[],
   apiKey: string,
-  topN = 8
+  topN = 8,
 ): Promise<{ id: string; score: number }[]> {
-  const client = new CohereClientV2({ token: apiKey })
-  const response = await client.rerank({
-    model: 'rerank-v4.0-pro',
-    query,
-    documents: candidates.map(c => c.text),
-    topN,
-  })
-  return response.results.map(r => ({
+  const res = await fetch("https://api.cohere.com/v2/rerank", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "rerank-v3.5",
+      query,
+      documents: candidates.map((c) => c.text),
+      top_n: topN,
+    }),
+  });
+  if (!res.ok)
+    throw new Error(`Cohere rerank failed: ${res.status} ${res.statusText}`);
+  const data = await res.json();
+  return data.results.map((r: { index: number; relevance_score: number }) => ({
     id: candidates[r.index].id,
-    score: r.relevanceScore,
-  }))
+    score: r.relevance_score,
+  }));
 }
+```
+
+IPC handler (`search:query`):
+
+```typescript
+ipcMain.handle("search:query", async (_, query: string) => {
+  const provider = (getSetting(db, "embedding_provider") ?? "cohere") as
+    | "cohere"
+    | "ollama";
+  const cohereApiKey = loadSecret(db, "cohere_api_key");
+  const embedConfig: EmbedConfig = {
+    provider,
+    apiKey: cohereApiKey ?? undefined,
+  };
+  return search(db, query, embedConfig, cohereApiKey ?? undefined);
+});
 ```
 
 **Steps:**
 
-- [ ] **Step 1: Write failing tests** — test cosine similarity with known vectors, test worker round-trip, test reranker mock, test full search pipeline with seeded data
-- [ ] **Step 2: Implement search worker**
+- [ ] **Step 1: Add `getDocumentById()` to database.ts**
+- [ ] **Step 2: Write failing tests** — test cosine similarity with known vectors, test reranker mock, test full search pipeline with seeded in-memory DB
 - [ ] **Step 3: Implement reranker**
-- [ ] **Step 4: Implement searcher orchestration**
-- [ ] **Step 5: Add IPC handler** — `search:query` channel
+- [ ] **Step 4: Implement searcher orchestration** (cosine similarity inline, no worker)
+- [ ] **Step 5: Add IPC handler + preload bridge** — `search:query` channel, `search()` on `CommonsAPI`
 - [ ] **Step 6: Run tests, verify pass**
 - [ ] **Step 7: Commit**
 
 ```bash
-git commit -m "feat: add search engine with worker-threaded cosine similarity and Cohere reranking"
+git commit -m "feat: add search engine with cosine similarity and Cohere reranking"
 ```
 
 ---
@@ -907,6 +1034,7 @@ git commit -m "feat: add search engine with worker-threaded cosine similarity an
 ## Task 6: Search UI
 
 **Files:**
+
 - Create: `src/renderer/src/pages/SearchPage.tsx`
 - Create: `src/renderer/src/components/search/SearchInput.tsx`
 - Create: `src/renderer/src/components/search/ResultCard.tsx`
@@ -914,9 +1042,11 @@ git commit -m "feat: add search engine with worker-threaded cosine similarity an
 - Modify: `src/renderer/src/App.tsx` — add search page route
 
 **Interfaces:**
+
 - Consumes: `window.api.search(query)` IPC channel from Task 5
 
 **Implementation details:**
+
 - `SearchInput`: text input with submit on Enter, loading spinner during search, debounce not needed (manual submit)
 - `ResultCard`: shows document title, heading (if present), text snippet (first ~200 chars), provider badge (Notion/Drive icon), relevance score as subtle indicator, "Open source" button calling `window.api.openExternal(url)`
 - `EmptyState`: grid of example question chips ("How do I get reimbursed?", "What does a tech lead do?", "Where are onboarding docs?", "How do we deploy?"). Clicking a chip fills the search input and submits.
@@ -942,13 +1072,15 @@ git commit -m "feat: add search UI with results, empty state, and example questi
 ## Task 7: Sync Manager
 
 **Files:**
+
 - Create: `src/main/sync/sync-manager.ts`
 - Create: `src/main/ipc/sync-handlers.ts`
 - Modify: `src/preload/index.ts` — add sync IPC channels
 - Test: `src/main/sync/__tests__/sync-manager.test.ts`
 
 **Interfaces:**
-- Consumes: `chunkText()` from Task 3, `embedDocuments()` from Task 4, `upsertChunks()` / `insertDocument()` from Task 1
+
+- Consumes: `chunkText()` from Task 3, `embedDocuments(texts, config)` / `getEmbeddingModelName(config)` / `embeddingToBuffer()` from Task 4, `upsertChunks()` / `insertDocument()` from Task 1
 - Consumes: Connector interface (produced by Tasks 8, 9): `{ fetchDocuments(): AsyncGenerator<RawDocument> }`
 - Produces: `syncSource(sourceId: string, connector: Connector, onProgress: (p: SyncProgress) => void): Promise<void>`
 
@@ -956,75 +1088,93 @@ git commit -m "feat: add search UI with results, empty state, and example questi
 
 ```typescript
 export interface RawDocument {
-  externalId: string
-  title: string
-  url: string | null
-  mimeType: string | null
-  modifiedAt: string | null
-  content: string
+  externalId: string;
+  title: string;
+  url: string | null;
+  mimeType: string | null;
+  modifiedAt: string | null;
+  content: string;
 }
 
 export interface Connector {
-  fetchDocuments(): AsyncGenerator<RawDocument>
+  fetchDocuments(): AsyncGenerator<RawDocument>;
 }
 
 export async function syncSource(
   db: Database.Database,
   sourceId: string,
   connector: Connector,
-  embeddingProvider: 'cohere' | 'ollama',
-  apiKey: string | null,
-  onProgress: (p: SyncProgress) => void
+  embedConfig: EmbedConfig,
+  onProgress: (p: SyncProgress) => void,
 ): Promise<void> {
-  const errors: string[] = []
-  let current = 0
+  const errors: string[] = [];
+  let current = 0;
 
   for await (const rawDoc of connector.fetchDocuments()) {
-    current++
-    onProgress({ sourceId, phase: 'fetching', current, total: 0, currentDocTitle: rawDoc.title, errors })
+    current++;
+    onProgress({
+      sourceId,
+      phase: "fetching",
+      current,
+      total: 0,
+      currentDocTitle: rawDoc.title,
+      errors,
+    });
 
     // Check content hash — skip unchanged docs
-    const contentHash = createHash('sha256').update(rawDoc.content).digest('hex')
-    const existing = getDocumentByExternalId(db, sourceId, rawDoc.externalId)
-    if (existing?.contentHash === contentHash) continue
+    const contentHash = createHash("sha256")
+      .update(rawDoc.content)
+      .digest("hex");
+    const existing = getDocumentByExternalId(db, sourceId, rawDoc.externalId);
+    if (existing?.contentHash === contentHash) continue;
 
     // Upsert document
-    const docId = existing?.id ?? crypto.randomUUID()
-    upsertDocument(db, { ...rawDoc, id: docId, sourceId, contentHash, syncStatus: 'pending' })
+    const docId = existing?.id ?? crypto.randomUUID();
+    insertDocument(db, {
+      ...rawDoc,
+      id: docId,
+      sourceId,
+      contentHash,
+      syncStatus: "pending",
+    });
 
     try {
       // Chunk
-      onProgress({ ...progress, phase: 'chunking' })
-      const chunks = chunkText(rawDoc.content, rawDoc.title)
+      onProgress({ ...progress, phase: "chunking" });
+      const chunks = chunkText(rawDoc.content, rawDoc.title);
 
       // Embed
-      onProgress({ ...progress, phase: 'embedding' })
+      onProgress({ ...progress, phase: "embedding" });
       const embeddings = await embedDocuments(
-        chunks.map(c => c.text),
-        embeddingProvider,
-        apiKey
-      )
+        chunks.map((c) => c.text),
+        embedConfig,
+      );
 
       // Store
-      onProgress({ ...progress, phase: 'storing' })
-      const modelName = getEmbeddingModelName(embeddingProvider)
-      deleteChunksByDocumentId(db, docId)
-      upsertChunks(db, chunks.map((c, i) => ({
-        id: crypto.randomUUID(),
-        documentId: docId,
-        chunkIndex: c.index,
-        heading: c.heading,
-        text: c.text,
-        embedding: embeddingToBuffer(embeddings[i]),
-        embeddingModel: modelName,
-        tokenCount: c.tokenCount,
-        createdAt: new Date().toISOString(),
-      })))
+      onProgress({ ...progress, phase: "storing" });
+      const modelName = getEmbeddingModelName(embedConfig);
+      deleteChunksByDocumentId(db, docId);
+      upsertChunks(
+        db,
+        chunks.map((c, i) => ({
+          id: crypto.randomUUID(),
+          documentId: docId,
+          chunkIndex: c.index,
+          heading: c.heading,
+          text: c.text,
+          embedding: embeddingToBuffer(embeddings[i]),
+          embeddingModel: modelName,
+          tokenCount: c.tokenCount,
+          createdAt: new Date().toISOString(),
+        })),
+      );
 
-      updateDocumentSyncStatus(db, docId, 'synced')
+      updateDocumentSyncStatus(db, docId, "synced");
     } catch (err) {
-      errors.push(`${rawDoc.title}: ${err instanceof Error ? err.message : 'Unknown error'}`)
-      updateDocumentSyncStatus(db, docId, 'error')
+      errors.push(
+        `${rawDoc.title}: ${err instanceof Error ? err.message : "Unknown error"}`,
+      );
+      updateDocumentSyncStatus(db, docId, "error");
     }
   }
 }
@@ -1033,12 +1183,13 @@ export async function syncSource(
 IPC handler pushes progress via `webContents.send()`:
 
 ```typescript
-ipcMain.handle('sync:start', async (event, sourceId: string) => {
-  const connector = getConnectorForSource(db, sourceId) // resolves to Notion or Drive connector
-  await syncSource(db, sourceId, connector, provider, apiKey, (progress) => {
-    event.sender.send('sync:progress', progress)
-  })
-})
+ipcMain.handle("sync:start", async (event, sourceId: string) => {
+  const connector = getConnectorForSource(db, sourceId); // resolves to Notion or Drive connector
+  const embedConfig = buildEmbedConfig(db); // reads provider + API key from settings/secrets
+  await syncSource(db, sourceId, connector, embedConfig, (progress) => {
+    event.sender.send("sync:progress", progress);
+  });
+});
 ```
 
 **Steps:**
@@ -1058,6 +1209,7 @@ git commit -m "feat: add sync manager with content hashing and error recovery"
 ## Task 8: Notion Connector
 
 **Files:**
+
 - Create: `src/main/auth/notion-oauth.ts`
 - Create: `src/main/connectors/notion.ts`
 - Modify: `src/main/ipc/handlers.ts` — add Notion auth channels
@@ -1065,6 +1217,7 @@ git commit -m "feat: add sync manager with content hashing and error recovery"
 - Test: `src/main/connectors/__tests__/notion.test.ts`
 
 **Interfaces:**
+
 - Consumes: `saveSecret()` / `loadSecret()` from Task 2
 - Produces: `NotionConnector` implementing `Connector` interface from Task 7
 - Produces: IPC channels: `auth:notion-oauth-start`, `auth:notion-paste-token`
@@ -1072,6 +1225,7 @@ git commit -m "feat: add sync manager with content hashing and error recovery"
 **Implementation details:**
 
 OAuth flow (`notion-oauth.ts`):
+
 1. Start HTTP server on fixed port 21337
 2. Open system browser: `https://api.notion.com/v1/oauth/authorize?client_id=...&redirect_uri=http://localhost:21337/callback&response_type=code&owner=user`
 3. Server receives callback with `code` param
@@ -1083,69 +1237,73 @@ OAuth flow (`notion-oauth.ts`):
 Paste-token fallback: user pastes internal integration token directly, stored the same way.
 
 Connector (`notion.ts`):
+
 ```typescript
-import { Client } from '@notionhq/client'
+import { Client } from "@notionhq/client";
 
 export class NotionConnector implements Connector {
-  private client: Client
-  private rootPageId: string
+  private client: Client;
+  private rootPageId: string;
 
   constructor(token: string, rootPageId: string) {
-    this.client = new Client({ auth: token })
-    this.rootPageId = rootPageId
+    this.client = new Client({ auth: token });
+    this.rootPageId = rootPageId;
   }
 
   async *fetchDocuments(): AsyncGenerator<RawDocument> {
-    yield* this.walkPage(this.rootPageId, 0)
+    yield* this.walkPage(this.rootPageId, 0);
   }
 
-  private async *walkPage(pageId: string, depth: number): AsyncGenerator<RawDocument> {
-    if (depth > 10) return // max depth guard
+  private async *walkPage(
+    pageId: string,
+    depth: number,
+  ): AsyncGenerator<RawDocument> {
+    if (depth > 10) return; // max depth guard
 
-    const page = await this.client.pages.retrieve({ page_id: pageId })
-    const title = extractPageTitle(page)
-    const url = (page as any).url ?? null
+    const page = await this.client.pages.retrieve({ page_id: pageId });
+    const title = extractPageTitle(page);
+    const url = (page as any).url ?? null;
 
-    const blocks = await this.fetchAllBlocks(pageId)
-    const content = blocksToText(blocks)
+    const blocks = await this.fetchAllBlocks(pageId);
+    const content = blocksToText(blocks);
 
     if (content.trim()) {
       yield {
         externalId: pageId,
         title,
         url,
-        mimeType: 'text/plain',
+        mimeType: "text/plain",
         modifiedAt: (page as any).last_edited_time ?? null,
         content,
-      }
+      };
     }
 
     // Recurse into child pages
     for (const block of blocks) {
-      if (block.type === 'child_page') {
-        yield* this.walkPage(block.id, depth + 1)
+      if (block.type === "child_page") {
+        yield* this.walkPage(block.id, depth + 1);
       }
-      if (block.type === 'child_database') {
-        yield* this.walkDatabase(block.id, depth + 1)
+      if (block.type === "child_database") {
+        yield* this.walkDatabase(block.id, depth + 1);
       }
     }
   }
 
   private async fetchAllBlocks(blockId: string): Promise<Block[]> {
-    const blocks: Block[] = []
-    let cursor: string | undefined
+    const blocks: Block[] = [];
+    let cursor: string | undefined;
     do {
       const response = await this.rateLimited(() =>
         this.client.blocks.children.list({
           block_id: blockId,
           start_cursor: cursor,
           page_size: 100,
-        })
-      )
-      blocks.push(...response.results)
-      cursor = response.has_more ? response.next_cursor! : undefined
-    } while (cursor)
-    return blocks
+        }),
+      );
+      blocks.push(...response.results);
+      cursor = response.has_more ? response.next_cursor! : undefined;
+    } while (cursor);
+    return blocks;
   }
 }
 ```
@@ -1153,6 +1311,7 @@ export class NotionConnector implements Connector {
 Block-to-text conversion — handle: paragraph, headings (h1/h2/h3), bulleted_list_item, numbered_list_item, toggle, callout, code, table, quote. Skip: image, video, embed, file, bookmark.
 
 Rate limiting: simple queue with 3 req/sec limit and exponential backoff on 429:
+
 ```typescript
 private async rateLimited<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   await this.throttle() // ensures 333ms between calls
@@ -1189,6 +1348,7 @@ git commit -m "feat: add Notion connector with OAuth, recursive page walking, an
 ## Task 9: Google Drive Connector
 
 **Files:**
+
 - Create: `src/main/auth/google-oauth.ts`
 - Create: `src/main/connectors/drive.ts`
 - Modify: `src/main/ipc/handlers.ts` — add Drive auth channels
@@ -1196,6 +1356,7 @@ git commit -m "feat: add Notion connector with OAuth, recursive page walking, an
 - Test: `src/main/connectors/__tests__/drive.test.ts`
 
 **Interfaces:**
+
 - Consumes: `saveSecret()` / `loadSecret()` from Task 2
 - Produces: `DriveConnector` implementing `Connector` interface from Task 7
 - Produces: IPC channels: `auth:google-oauth-start`
@@ -1203,97 +1364,109 @@ git commit -m "feat: add Notion connector with OAuth, recursive page walking, an
 **Implementation details:**
 
 OAuth flow (`google-oauth.ts`):
+
 ```typescript
-import { OAuth2Client } from 'google-auth-library'
-import { google } from 'googleapis'
-import http from 'node:http'
+import { OAuth2Client } from "google-auth-library";
+import { google } from "googleapis";
+import http from "node:http";
 
-const SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
-const REDIRECT_PORT = 21338
-const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`
+const SCOPES = ["https://www.googleapis.com/auth/drive.readonly"];
+const REDIRECT_PORT = 21338;
+const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`;
 
-export async function startGoogleOAuth(clientId: string, clientSecret: string): Promise<OAuth2Client> {
-  const client = new OAuth2Client(clientId, clientSecret, REDIRECT_URI)
+export async function startGoogleOAuth(
+  clientId: string,
+  clientSecret: string,
+): Promise<OAuth2Client> {
+  const client = new OAuth2Client(clientId, clientSecret, REDIRECT_URI);
   const authUrl = client.generateAuthUrl({
-    access_type: 'offline',
+    access_type: "offline",
     scope: SCOPES,
-    prompt: 'consent', // force refresh token
-  })
+    prompt: "consent", // force refresh token
+  });
 
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
-      const url = new URL(req.url!, `http://localhost:${REDIRECT_PORT}`)
-      const code = url.searchParams.get('code')
-      if (!code) { reject(new Error('No code')); return }
+      const url = new URL(req.url!, `http://localhost:${REDIRECT_PORT}`);
+      const code = url.searchParams.get("code");
+      if (!code) {
+        reject(new Error("No code"));
+        return;
+      }
 
-      const { tokens } = await client.getToken(code)
-      client.setCredentials(tokens)
+      const { tokens } = await client.getToken(code);
+      client.setCredentials(tokens);
 
-      res.writeHead(200, { 'Content-Type': 'text/html' })
-      res.end('<h1>Connected! You can close this tab.</h1>')
-      server.close()
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<h1>Connected! You can close this tab.</h1>");
+      server.close();
 
-      resolve(client)
-    })
-    server.listen(REDIRECT_PORT)
-    shell.openExternal(authUrl)
-  })
+      resolve(client);
+    });
+    server.listen(REDIRECT_PORT);
+    shell.openExternal(authUrl);
+  });
 }
 ```
 
 Token refresh — store `{ access_token, refresh_token, expiry_date }` encrypted. Before each API call:
+
 ```typescript
-async function getAuthenticatedClient(db: Database.Database): Promise<OAuth2Client> {
-  const tokensJson = await loadSecret(db, 'google_tokens')
-  if (!tokensJson) throw new Error('Not authenticated with Google')
-  const tokens = JSON.parse(tokensJson)
-  const client = new OAuth2Client(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI)
-  client.setCredentials(tokens)
+async function getAuthenticatedClient(
+  db: Database.Database,
+): Promise<OAuth2Client> {
+  const tokensJson = await loadSecret(db, "google_tokens");
+  if (!tokensJson) throw new Error("Not authenticated with Google");
+  const tokens = JSON.parse(tokensJson);
+  const client = new OAuth2Client(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+  client.setCredentials(tokens);
 
   // Refresh if expired or expiring within 5 minutes
   if (tokens.expiry_date && Date.now() > tokens.expiry_date - 300_000) {
-    const { credentials } = await client.refreshAccessToken()
-    client.setCredentials(credentials)
-    await saveSecret(db, 'google_tokens', JSON.stringify(credentials))
+    const { credentials } = await client.refreshAccessToken();
+    client.setCredentials(credentials);
+    await saveSecret(db, "google_tokens", JSON.stringify(credentials));
   }
 
-  return client
+  return client;
 }
 ```
 
 Connector (`drive.ts`):
+
 ```typescript
 export class DriveConnector implements Connector {
-  private drive: drive_v3.Drive
-  private folderId: string
+  private drive: drive_v3.Drive;
+  private folderId: string;
 
   constructor(auth: OAuth2Client, folderId: string) {
-    this.drive = google.drive({ version: 'v3', auth })
-    this.folderId = folderId
+    this.drive = google.drive({ version: "v3", auth });
+    this.folderId = folderId;
   }
 
   async *fetchDocuments(): AsyncGenerator<RawDocument> {
-    yield* this.walkFolder(this.folderId)
+    yield* this.walkFolder(this.folderId);
   }
 
   private async *walkFolder(folderId: string): AsyncGenerator<RawDocument> {
-    let pageToken: string | undefined
+    let pageToken: string | undefined;
     do {
       const res = await this.drive.files.list({
         q: `'${folderId}' in parents and trashed = false`,
-        fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink)',
+        fields:
+          "nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink)",
         pageSize: 100,
         pageToken,
-      })
+      });
 
       for (const file of res.data.files ?? []) {
-        if (file.mimeType === 'application/vnd.google-apps.folder') {
-          yield* this.walkFolder(file.id!)
-          continue
+        if (file.mimeType === "application/vnd.google-apps.folder") {
+          yield* this.walkFolder(file.id!);
+          continue;
         }
 
-        const content = await this.extractContent(file)
-        if (!content) continue
+        const content = await this.extractContent(file);
+        if (!content) continue;
 
         yield {
           externalId: file.id!,
@@ -1302,56 +1475,77 @@ export class DriveConnector implements Connector {
           mimeType: file.mimeType ?? null,
           modifiedAt: file.modifiedTime ?? null,
           content,
-        }
+        };
       }
 
-      pageToken = res.data.nextPageToken ?? undefined
-    } while (pageToken)
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
   }
 
-  private async extractContent(file: drive_v3.Schema$File): Promise<string | null> {
-    const mime = file.mimeType!
+  private async extractContent(
+    file: drive_v3.Schema$File,
+  ): Promise<string | null> {
+    const mime = file.mimeType!;
 
-    if (mime === 'application/vnd.google-apps.document') {
-      const res = await this.drive.files.export({ fileId: file.id!, mimeType: 'text/plain' })
-      return res.data as string
+    if (mime === "application/vnd.google-apps.document") {
+      const res = await this.drive.files.export({
+        fileId: file.id!,
+        mimeType: "text/plain",
+      });
+      return res.data as string;
     }
 
-    if (mime === 'application/pdf') {
-      const res = await this.drive.files.get({ fileId: file.id!, alt: 'media' }, { responseType: 'arraybuffer' })
-      const pdf = await import('pdf-parse')
-      const parsed = await pdf.default(Buffer.from(res.data as ArrayBuffer))
-      return parsed.text
+    if (mime === "application/pdf") {
+      const res = await this.drive.files.get(
+        { fileId: file.id!, alt: "media" },
+        { responseType: "arraybuffer" },
+      );
+      const pdf = await import("pdf-parse");
+      const parsed = await pdf.default(Buffer.from(res.data as ArrayBuffer));
+      return parsed.text;
     }
 
-    if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      const res = await this.drive.files.get({ fileId: file.id!, alt: 'media' }, { responseType: 'arraybuffer' })
-      const mammoth = await import('mammoth')
-      const result = await mammoth.extractRawText({ buffer: Buffer.from(res.data as ArrayBuffer) })
-      return result.value
+    if (
+      mime ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ) {
+      const res = await this.drive.files.get(
+        { fileId: file.id!, alt: "media" },
+        { responseType: "arraybuffer" },
+      );
+      const mammoth = await import("mammoth");
+      const result = await mammoth.extractRawText({
+        buffer: Buffer.from(res.data as ArrayBuffer),
+      });
+      return result.value;
     }
 
-    if (mime === 'text/plain' || mime === 'text/markdown') {
-      const res = await this.drive.files.get({ fileId: file.id!, alt: 'media' })
-      return res.data as string
+    if (mime === "text/plain" || mime === "text/markdown") {
+      const res = await this.drive.files.get({
+        fileId: file.id!,
+        alt: "media",
+      });
+      return res.data as string;
     }
 
-    return null // unsupported file type
+    return null; // unsupported file type
   }
 }
 ```
 
 Drive folder URL parsing:
+
 ```typescript
 export function extractFolderIdFromUrl(url: string): string | null {
   // Handles: https://drive.google.com/drive/folders/FOLDER_ID
   // and: https://drive.google.com/drive/u/0/folders/FOLDER_ID
-  const match = url.match(/\/folders\/([a-zA-Z0-9_-]+)/)
-  return match?.[1] ?? null
+  const match = url.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  return match?.[1] ?? null;
 }
 ```
 
 Edge cases:
+
 - Files > 50MB: skip with warning logged
 - PDF > 100 pages: pdf-parse handles this fine in memory for typical club docs, but add a 200-page safety limit
 - Token refresh failure (refresh token revoked): catch, delete stored tokens, surface "Reconnect Google Drive" in UI
@@ -1376,6 +1570,7 @@ git commit -m "feat: add Google Drive connector with OAuth, folder walking, and 
 ## Task 10: Source Management UI
 
 **Files:**
+
 - Create: `src/renderer/src/pages/SourcesPage.tsx`
 - Create: `src/renderer/src/components/sources/SourceList.tsx`
 - Create: `src/renderer/src/components/sources/ConnectNotionButton.tsx`
@@ -1386,6 +1581,7 @@ git commit -m "feat: add Google Drive connector with OAuth, folder walking, and 
 - Modify: `src/renderer/src/App.tsx` — add sources/sync navigation
 
 **Interfaces:**
+
 - Consumes: `window.api.listSources()`, `window.api.addSource()`, `window.api.removeSource()`, `window.api.syncSource()`, `window.api.onSyncProgress()`
 
 **Implementation details:**
@@ -1393,6 +1589,7 @@ git commit -m "feat: add Google Drive connector with OAuth, folder walking, and 
 Main layout: sidebar navigation with Search / Sources / Settings tabs.
 
 `SourcesPage`:
+
 - Top: "Connect a source" section with Notion and Drive buttons
 - Below: list of connected sources as cards
 - Each card shows: provider icon, name, doc count, last synced time, "Sync" button, "Disconnect" button (with confirmation dialog)
@@ -1402,6 +1599,7 @@ Main layout: sidebar navigation with Search / Sources / Settings tabs.
 `DriveFolderInput`: text input for pasting Drive folder URL. Validates format, extracts folder ID, shows folder name from API.
 
 `SyncPanel`: shown during sync. Listens to `sync:progress` events. Shows:
+
 - Current phase (Fetching → Chunking → Embedding → Storing)
 - Progress bar (current / total docs)
 - Current document name
@@ -1428,18 +1626,21 @@ git commit -m "feat: add source management UI with connect, sync, and disconnect
 ## Task 11: Polish + Error Handling
 
 **Files:**
+
 - Create: `src/renderer/src/pages/SettingsPage.tsx`
 - Create: `src/renderer/src/components/ui/ErrorBanner.tsx`
 - Create: `src/renderer/src/components/setup/OnboardingWizard.tsx`
 - Modify: various existing components — add loading states, error states, empty states
 
 **Interfaces:**
+
 - Consumes: all existing IPC channels
 - Produces: `window.api.getStorageStats()`, `window.api.clearAllData()`
 
 **Implementation details:**
 
 Settings page:
+
 - Change/remove Cohere API key (re-validate on change)
 - Switch embedding provider (Cohere ↔ Ollama) with warning: "Switching providers requires re-embedding all documents"
 - "Re-embed all documents" button (triggers re-sync of all sources)
@@ -1447,16 +1648,19 @@ Settings page:
 - "Clear all data" with confirmation dialog (wipes DB tables, not the DB file)
 
 Embedding model mismatch handling:
+
 - `checkEmbeddingHealth()` IPC channel: queries chunks table, counts distinct `embedding_model` values, returns warning if mismatched
 - Show banner on SearchPage if mismatch detected: "Some documents were embedded with a different model. Results may be less accurate. Re-sync to fix."
 
 Error handling:
+
 - Cohere API unreachable: search falls back to cosine-sim only, banner: "Reranking unavailable — results may be less accurate"
 - OAuth token expired: inline "Reconnect" button on the source card
 - Invalid API key: redirect to setup page
 - Network errors during sync: per-document error tracking, "Retry failed" button
 
 Onboarding wizard:
+
 - Step 1: Welcome screen ("Commons — Search your club's docs")
 - Step 2: API key or Ollama setup
 - Step 3: Connect at least one source
@@ -1487,74 +1691,45 @@ git commit -m "feat: add settings, onboarding wizard, error handling, and loadin
 ## Task 12: Packaging + Distribution
 
 **Files:**
-- Create: `forge.config.ts` — electron-forge configuration
-- Modify: `package.json` — add forge scripts and config
-- Create: `resources/icon.icns`, `resources/icon.ico` — app icons
+
+- Create: `forge.config.ts` — electron-forge configuration (replaces `electron-builder.yml`)
+- Modify: `package.json` — `main` field → `./dist/main/index.js`, replace build scripts with forge commands
+- Modify: `electron.vite.config.ts` — set `build.outDir` per-target to `dist/`, externalize `better-sqlite3`
+- Modify: `src/main/index.ts` — add `electron-squirrel-startup` handler for Windows
+- Modify: `pnpm-workspace.yaml` — add `nodeLinker: hoisted` (required by electron-forge)
+- Create: `.npmrc` — `node-linker=hoisted`
+- Delete: `electron-builder.yml` — replaced by `forge.config.ts`
 
 **Interfaces:**
-- Consumes: built app from electron-vite
+
+- Consumes: built app from electron-vite (output in `dist/`)
 
 **Implementation details:**
 
-Install electron-forge:
-```bash
-pnpm add -D @electron-forge/cli @electron-forge/maker-dmg @electron-forge/maker-squirrel @electron-forge/plugin-auto-unpack-natives
-```
+The project uses `electron-forge` for packaging with `electron-vite` handling the build step. electron-vite outputs to `dist/` (not `out/`) so forge can use `out/` for its packaging output. The `forge.config.ts` configures:
 
-`forge.config.ts`:
-```typescript
-import type { ForgeConfig } from '@electron-forge/shared-types'
-import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives'
-
-const config: ForgeConfig = {
-  packagerConfig: {
-    asar: true,
-    icon: './resources/icon',
-    appBundleId: 'com.commons.app',
-    name: 'Commons',
-  },
-  plugins: [
-    new AutoUnpackNativesPlugin({}),
-  ],
-  makers: [
-    {
-      name: '@electron-forge/maker-dmg',
-      config: { name: 'Commons' },
-    },
-    {
-      name: '@electron-forge/maker-squirrel',
-      config: { name: 'Commons' },
-    },
-  ],
-}
-
-export default config
-```
+- `packagerConfig`: app identity (`com.commons.app`), icons (`./build/icon`), asar unpacking for `resources/`, macOS entitlements and code signing, `ignore` function to exclude source files
+- `rebuildConfig`: rebuilds `better-sqlite3` for Electron's Node version
+- Makers: `maker-dmg` (macOS), `maker-zip` (macOS fallback), `maker-squirrel` (Windows — per-user install, no admin required)
+- Plugins: `plugin-auto-unpack-natives` (unpacks `.node` binaries from asar)
 
 Build flow:
-1. `pnpm run build` (electron-vite builds main + preload + renderer)
-2. `pnpm exec electron-forge make` (packages the built output into installers)
 
-Add to `package.json`:
-```json
-"scripts": {
-  "make": "electron-vite build && electron-forge make"
-}
-```
+1. `pnpm run build` (electron-vite builds main + preload + renderer to `dist/`)
+2. `pnpm run make:mac` or `pnpm run make:win` (electron-forge packages into installers in `out/make/`)
 
 **Steps:**
 
-- [ ] **Step 1: Install electron-forge and makers**
-- [ ] **Step 2: Create forge.config.ts**
-- [ ] **Step 3: Create app icons** (placeholder is fine for MVP)
-- [ ] **Step 4: Build on macOS** — verify DMG installs and app launches
-- [ ] **Step 5: Build on Windows** — verify Squirrel installer works (or note as TODO if no Windows machine available)
-- [ ] **Step 6: Upload to GitHub Releases with version tag**
-- [ ] **Step 7: Write minimal README** — setup instructions (get Cohere key, connect sources, sync, search)
-- [ ] **Step 8: Commit**
+- [ ] **Step 1: Verify forge.config.ts** — check signing, entitlements, makers, ignore function
+- [ ] **Step 2: Create app icons** (placeholder is fine for MVP)
+- [ ] **Step 3: Build on macOS** — `pnpm run make:mac`, verify DMG installs and app launches
+- [ ] **Step 4: Build on Windows** — `pnpm run make:win`, verify Squirrel installer works (or note as TODO if no Windows machine available)
+- [ ] **Step 5: Upload to GitHub Releases with version tag**
+- [ ] **Step 6: Write minimal README** — setup instructions (get Cohere key, connect sources, sync, search)
+- [ ] **Step 7: Commit**
 
 ```bash
-git commit -m "feat: add electron-forge packaging for macOS DMG and Windows Squirrel"
+git commit -m "feat: configure electron-forge packaging for macOS DMG and Windows Squirrel"
 ```
 
 ---
@@ -1562,6 +1737,7 @@ git commit -m "feat: add electron-forge packaging for macOS DMG and Windows Squi
 ## Verification Plan
 
 ### Per-task verification
+
 Each task has its own test suite (unit tests via Vitest) and manual verification steps noted in the task.
 
 ### End-to-end verification (after all tasks complete)
