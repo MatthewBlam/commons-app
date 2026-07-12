@@ -21,10 +21,8 @@ const api = {
     ipcRenderer.invoke("auth:notion-oauth-start"),
   cancelNotionOAuth: (): Promise<void> =>
     ipcRenderer.invoke("auth:notion-oauth-cancel"),
-  listNotionPages: (
-    parentPageId?: string,
-  ): Promise<import("../shared/types").NotionItemSummary[]> =>
-    ipcRenderer.invoke("notion:list-pages", parentPageId),
+  listNotionPages: (): Promise<import("../shared/types").NotionItemSummary[]> =>
+    ipcRenderer.invoke("notion:list-pages"),
   startGoogleOAuth: (): Promise<{ email: string }> =>
     ipcRenderer.invoke("auth:google-oauth-start"),
   cancelGoogleOAuth: (): Promise<void> =>
@@ -72,6 +70,14 @@ const api = {
   > => ipcRenderer.invoke("embedding:health"),
   deleteSecret: (key: string): Promise<void> =>
     ipcRenderer.invoke("secrets:delete", key),
+  hasSecret: (key: string): Promise<boolean> =>
+    ipcRenderer.invoke("secrets:has", key),
+  getAutoSync: (): Promise<{ enabled: boolean; intervalMs: number; lastSyncedAt: string | null; syncing: boolean }> =>
+    ipcRenderer.invoke("settings:get-auto-sync"),
+  setAutoSyncEnabled: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke("settings:set-auto-sync-enabled", enabled),
+  setAutoSyncInterval: (ms: number): Promise<void> =>
+    ipcRenderer.invoke("settings:set-auto-sync-interval", ms),
 };
 
 contextBridge.exposeInMainWorld("api", api);

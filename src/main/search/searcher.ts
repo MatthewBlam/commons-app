@@ -59,6 +59,7 @@ export async function search(
         bufferToEmbedding(chunk.embedding!),
       ),
     }))
+    .filter(({ score }) => Number.isFinite(score))
     .sort((a, b) => b.score - a.score)
     .slice(0, COSINE_TOP_K);
 

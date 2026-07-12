@@ -23,9 +23,15 @@ function formatElapsed(seconds: number): string {
   return `${m}m ${s}s`;
 }
 
-export function SyncPanel({ sourceId, sourceName, onComplete }: SyncPanelProps): React.JSX.Element {
+export function SyncPanel({
+  sourceId,
+  sourceName,
+  onComplete,
+}: SyncPanelProps): React.JSX.Element {
   const [progress, setProgress] = useState<SyncProgress | null>(null);
-  const [status, setStatus] = useState<"syncing" | "complete" | "canceled" | "error">("syncing");
+  const [status, setStatus] = useState<
+    "syncing" | "complete" | "canceled" | "error"
+  >("syncing");
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const startedRef = useRef(false);
@@ -52,7 +58,6 @@ export function SyncPanel({ sourceId, sourceName, onComplete }: SyncPanelProps):
       });
 
     return () => {
-      startedRef.current = false;
       unsubRef.current?.();
     };
   }, [sourceId]);
@@ -63,14 +68,27 @@ export function SyncPanel({ sourceId, sourceName, onComplete }: SyncPanelProps):
     return () => clearInterval(interval);
   }, [status]);
 
+  useEffect(() => {
+    if (status === "syncing") return;
+    const timer = setTimeout(onComplete, 1500);
+    return () => clearTimeout(timer);
+  }, [status, onComplete]);
+
   function handleCancel(): void {
     window.api.cancelSync(sourceId).catch(() => {});
     setStatus("canceled");
   }
 
-  const phaseLabel = progress ? (PHASE_LABELS[progress.phase] ?? progress.phase) : "Starting sync";
+  const phaseLabel = progress
+    ? (PHASE_LABELS[progress.phase] ?? progress.phase)
+    : "Starting sync";
 
-  const statusLabel = status === "complete" ? "Sync complete" : status === "canceled" ? "Sync canceled" : `Syncing ${sourceName}`;
+  const statusLabel =
+    status === "complete"
+      ? "Sync complete"
+      : status === "canceled"
+        ? "Sync canceled"
+        : `Syncing ${sourceName}`;
 
   return (
     <div className="border-x border-b border-border rounded-b-lg bg-card/50 px-4 py-3 space-y-3">
@@ -88,16 +106,23 @@ export function SyncPanel({ sourceId, sourceName, onComplete }: SyncPanelProps):
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Spinner className="size-3.5" />
             <span>{phaseLabel}</span>
-            <span className="ml-auto tabular-nums">{formatElapsed(elapsed)}</span>
+            <span className="ml-auto tabular-nums">
+              {formatElapsed(elapsed)}
+            </span>
           </div>
 
           {progress && progress.current > 0 && (
             <p className="text-xs text-muted-foreground">
-              {progress.current} document{progress.current !== 1 ? "s" : ""} processed
+              {progress.current} document{progress.current !== 1 ? "s" : ""}{" "}
+              processed
             </p>
           )}
 
-          {progress?.currentDocTitle && <p className="text-xs text-muted-foreground truncate">{progress.currentDocTitle}</p>}
+          {progress?.currentDocTitle && (
+            <p className="text-xs text-muted-foreground truncate">
+              {progress.currentDocTitle}
+            </p>
+          )}
         </div>
       )}
 
@@ -118,9 +143,12 @@ export function SyncPanel({ sourceId, sourceName, onComplete }: SyncPanelProps):
       )}
 
       {status !== "syncing" && (
-        <Button size="sm" variant="outline" onClick={onComplete}>
-          Done
-        </Button>
+        <div className="text-xs text-muted-foreground">
+          {status === "complete" && progress && progress.skipped > 0 && (
+            <p>{progress.skipped} unchanged, skipped</p>
+          )}
+          <p>{status === "complete" ? "Dismissing…" : "Done"}</p>
+        </div>
       )}
     </div>
   );

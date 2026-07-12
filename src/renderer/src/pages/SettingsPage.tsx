@@ -18,6 +18,16 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatRelativeTime(iso: string): string {
+  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: SettingsPageProps): React.JSX.Element {
   const [provider, setProvider] = useState<string>("cohere");
   const [hasKey, setHasKey] = useState(false);
@@ -27,23 +37,45 @@ export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: 
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keySuccess, setKeySuccess] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [disconnectingNotion, setDisconnectingNotion] = useState(false);
+  const [disconnectingDrive, setDisconnectingDrive] = useState(false);
+  const [hasNotion, setHasNotion] = useState(false);
+  const [hasDrive, setHasDrive] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
+  const [autoSyncInterval, setAutoSyncInterval] = useState(30 * 60 * 1000);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [autoSyncing, setAutoSyncing] = useState(false);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const loaded = useRef(false);
+  const prevVisibleRef = useRef(false);
 
   useEffect(() => {
-    if (!visible || loaded.current) return;
-    loaded.current = true;
-    Promise.all([window.api.getEmbeddingProvider(), window.api.loadSecret("cohere_api_key"), window.api.getStorageStats()])
-      .then(([p, key, s]) => {
-        setProvider(p);
-        setHasKey(key !== null);
-        setStats(s);
-        setLoadError(null);
-      })
-      .catch(() => {
-        setLoadError("Failed to load settings.");
-      });
+    if (visible && !prevVisibleRef.current) {
+      Promise.all([
+        window.api.getEmbeddingProvider(),
+        window.api.loadSecret("cohere_api_key"),
+        window.api.getStorageStats(),
+        window.api.getAutoSync(),
+        window.api.hasSecret("notion_token"),
+        window.api.hasSecret("google_tokens"),
+      ])
+        .then(([p, key, s, sync, notion, drive]) => {
+          setProvider(p);
+          setHasKey(key !== null);
+          setStats(s);
+          setAutoSyncEnabled(sync.enabled);
+          setAutoSyncInterval(sync.intervalMs);
+          setLastSyncedAt(sync.lastSyncedAt);
+          setAutoSyncing(sync.syncing);
+          setHasNotion(notion);
+          setHasDrive(drive);
+          setLoadError(null);
+        })
+        .catch(() => {
+          setLoadError("Failed to load settings.");
+        });
+    }
+    prevVisibleRef.current = visible;
   }, [visible]);
 
   useEffect(() => {
@@ -66,6 +98,7 @@ export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: 
         setHasKey(true);
         setNewKey("");
         setKeySuccess(true);
+        if (successTimerRef.current) clearTimeout(successTimerRef.current);
         successTimerRef.current = setTimeout(() => setKeySuccess(false), 3000);
       } else {
         setKeyError("Invalid API key. Please check and try again.");
@@ -82,6 +115,7 @@ export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: 
     try {
       await window.api.deleteSecret("cohere_api_key");
       setHasKey(false);
+      onProviderReset();
     } catch {
       setKeyError("Failed to remove key.");
     }
@@ -101,11 +135,57 @@ export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: 
     }
   }
 
+  async function handleToggleAutoSync(enabled: boolean): Promise<void> {
+    try {
+      await window.api.setAutoSyncEnabled(enabled);
+      setAutoSyncEnabled(enabled);
+    } catch {
+      setLoadError("Failed to update auto-sync setting.");
+    }
+  }
+
+  async function handleSetSyncInterval(ms: number): Promise<void> {
+    try {
+      await window.api.setAutoSyncInterval(ms);
+      setAutoSyncInterval(ms);
+    } catch {
+      setLoadError("Failed to update sync interval.");
+    }
+  }
+
+  async function handleDisconnectNotion(): Promise<void> {
+    if (!confirm("Disconnect Notion? You will need to re-authenticate to sync Notion sources.")) return;
+    setDisconnectingNotion(true);
+    try {
+      await window.api.deleteSecret("notion_token");
+      setHasNotion(false);
+    } catch {
+      setLoadError("Failed to disconnect Notion.");
+    } finally {
+      setDisconnectingNotion(false);
+    }
+  }
+
+  async function handleDisconnectDrive(): Promise<void> {
+    if (!confirm("Disconnect Google Drive? You will need to re-authenticate to sync Drive sources.")) return;
+    setDisconnectingDrive(true);
+    try {
+      await window.api.deleteSecret("google_tokens");
+      setHasDrive(false);
+    } catch {
+      setLoadError("Failed to disconnect Google Drive.");
+    } finally {
+      setDisconnectingDrive(false);
+    }
+  }
+
   async function handleClearAllData(): Promise<void> {
     if (!confirm("Delete all sources, documents, and settings? This cannot be undone.")) return;
     setClearing(true);
     try {
       await window.api.clearAllData();
+      setHasNotion(false);
+      setHasDrive(false);
       onProviderReset();
     } catch {
       setLoadError("Failed to clear data.");
@@ -115,7 +195,7 @@ export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: 
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-10 py-3">
+    <div className="max-w-3xl mx-auto px-10 pt-3 pb-8">
       <h1 className="text-2xl font-semibold mb-1">Settings</h1>
       <p className="text-muted-foreground text-sm mb-6">Manage your embedding provider and app data</p>
 
@@ -140,19 +220,46 @@ export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: 
           </section>
 
           <section className="space-y-3">
-            <h2 className="text-sm font-medium text-muted-foreground">Appearance</h2>
+            <h2 className="text-sm font-medium text-muted-foreground">Background Sync</h2>
             <div className="flex gap-2">
-              <Button variant={!dark ? "default" : "outline"} size="sm" onClick={() => dark && onToggleTheme()}>
-                <SunIcon className="size-4 mr-1.5" />
-                Light
+              <Button variant={autoSyncEnabled ? "default" : "outline"} size="sm" onClick={() => handleToggleAutoSync(true)}>
+                Enabled
               </Button>
-              <Button variant={dark ? "default" : "outline"} size="sm" onClick={() => !dark && onToggleTheme()}>
-                <MoonIcon className="size-4 mr-1.5" />
-                Dark
+              <Button variant={!autoSyncEnabled ? "default" : "outline"} size="sm" onClick={() => handleToggleAutoSync(false)}>
+                Disabled
               </Button>
             </div>
+            {autoSyncEnabled && (
+              <div className="flex gap-2">
+                {[
+                  { label: "15 min", ms: 15 * 60 * 1000 },
+                  { label: "30 min", ms: 30 * 60 * 1000 },
+                  { label: "1 hr", ms: 60 * 60 * 1000 },
+                  { label: "2 hr", ms: 2 * 60 * 60 * 1000 },
+                ].map((opt) => (
+                  <Button key={opt.ms} variant={autoSyncInterval === opt.ms ? "default" : "outline"} size="sm" onClick={() => handleSetSyncInterval(opt.ms)}>
+                    {opt.label}
+                  </Button>
+                ))}
+              </div>
+            )}
+            {autoSyncEnabled && <p className="text-xs text-muted-foreground">{autoSyncing ? "Syncing now…" : lastSyncedAt ? `Last synced ${formatRelativeTime(lastSyncedAt)}` : "No sync yet"}</p>}
           </section>
         </div>
+
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium text-muted-foreground">Appearance</h2>
+          <div className="flex gap-2">
+            <Button variant={!dark ? "default" : "outline"} size="sm" onClick={() => dark && onToggleTheme()}>
+              <SunIcon className="size-4 mr-1.5" />
+              Light
+            </Button>
+            <Button variant={dark ? "default" : "outline"} size="sm" onClick={() => !dark && onToggleTheme()}>
+              <MoonIcon className="size-4 mr-1.5" />
+              Dark
+            </Button>
+          </div>
+        </section>
 
         {provider === "cohere" && (
           <section className="space-y-3">
@@ -218,10 +325,17 @@ export function SettingsPage({ visible, dark, onToggleTheme, onProviderReset }: 
 
         <section className="space-y-3">
           <h2 className="text-sm font-medium text-muted-foreground">Danger Zone</h2>
-          <Button variant="destructive-outline" size="sm" onClick={handleClearAllData} loading={clearing}>
-            Clear all data
-          </Button>
-          <p className="text-xs text-muted-foreground">Removes all sources, documents, embeddings, and settings — you will need to set up the app again</p>
+          <div className="flex gap-2">
+            <Button variant="destructive-outline" size="sm" onClick={handleClearAllData} loading={clearing}>
+              Clear all data
+            </Button>
+            <Button variant="destructive-outline" size="sm" onClick={handleDisconnectNotion} loading={disconnectingNotion} disabled={!hasNotion}>
+              Disconnect Notion
+            </Button>
+            <Button variant="destructive-outline" size="sm" onClick={handleDisconnectDrive} loading={disconnectingDrive} disabled={!hasDrive}>
+              Disconnect Google Drive
+            </Button>
+          </div>
         </section>
       </div>
     </div>

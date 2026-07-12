@@ -88,7 +88,9 @@ export function getSourceByProviderAndRoot(
   rootExternalId: string,
 ): SourceRow | null {
   const row = db
-    .prepare("SELECT * FROM sources WHERE provider = ? AND root_external_id = ?")
+    .prepare(
+      "SELECT * FROM sources WHERE provider = ? AND root_external_id = ?",
+    )
     .get(provider, rootExternalId) as SourceDbRow | undefined;
   if (!row) return null;
   return {
@@ -196,11 +198,19 @@ export function getDocumentsByIds(
   ids: string[],
 ): Map<string, DocumentRow> {
   if (ids.length === 0) return new Map();
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = db
-    .prepare(`SELECT * FROM documents WHERE id IN (${placeholders})`)
-    .all(...ids) as DocumentDbRow[];
-  return new Map(rows.map((row) => [row.id, mapDocRow(row)]));
+  const BATCH_SIZE = 500;
+  const result = new Map<string, DocumentRow>();
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const batch = ids.slice(i, i + BATCH_SIZE);
+    const placeholders = batch.map(() => "?").join(",");
+    const rows = db
+      .prepare(`SELECT * FROM documents WHERE id IN (${placeholders})`)
+      .all(...batch) as DocumentDbRow[];
+    for (const row of rows) {
+      result.set(row.id, mapDocRow(row));
+    }
+  }
+  return result;
 }
 
 export function getDocumentsBySourceId(
@@ -354,6 +364,39 @@ export function getDocumentCountBySourceId(
   return row.count;
 }
 
+export function getIncrementalSyncMap(
+  db: Database.Database,
+  sourceId: string,
+  currentModelName: string,
+): Map<string, string> {
+  const rows = db
+    .prepare(
+      `SELECT d.external_id, d.modified_at
+       FROM documents d
+       WHERE d.source_id = ?
+         AND d.modified_at IS NOT NULL
+         AND d.content_hash IS NOT NULL
+         AND d.sync_status = 'synced'
+         AND NOT EXISTS (
+           SELECT 1 FROM chunks c
+           WHERE c.document_id = d.id
+             AND c.embedding_model IS NOT NULL
+             AND c.embedding_model != ?
+           LIMIT 1
+         )`,
+    )
+    .all(sourceId, currentModelName) as {
+    external_id: string;
+    modified_at: string;
+  }[];
+
+  const map = new Map<string, string>();
+  for (const row of rows) {
+    map.set(row.external_id, row.modified_at);
+  }
+  return map;
+}
+
 // --- Settings ---
 
 export function upsertSetting(
@@ -419,6 +462,15 @@ export function getChunkCountByModel(
       .prepare("SELECT COUNT(*) as c FROM chunks WHERE embedding_model = ?")
       .get(model) as { c: number }
   ).c;
+}
+
+export function resetStalePendingDocuments(db: Database.Database): number {
+  const result = db
+    .prepare(
+      "UPDATE documents SET sync_status = 'error' WHERE sync_status = 'pending'",
+    )
+    .run();
+  return result.changes;
 }
 
 export function getEmbeddingHealth(db: Database.Database): EmbeddingHealthRow {

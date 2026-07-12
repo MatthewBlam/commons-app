@@ -2,6 +2,9 @@ import { resolve } from "path";
 import { defineConfig } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { config as dotenvConfig } from "dotenv";
+
+dotenvConfig();
 
 export default defineConfig({
   main: {
@@ -10,6 +13,12 @@ export default defineConfig({
       rollupOptions: {
         external: ["better-sqlite3"],
       },
+    },
+    define: {
+      "process.env.GOOGLE_CLIENT_ID": JSON.stringify(process.env.GOOGLE_CLIENT_ID ?? ""),
+      "process.env.GOOGLE_CLIENT_SECRET": JSON.stringify(process.env.GOOGLE_CLIENT_SECRET ?? ""),
+      "process.env.NOTION_CLIENT_ID": JSON.stringify(process.env.NOTION_CLIENT_ID ?? ""),
+      "process.env.NOTION_CLIENT_SECRET": JSON.stringify(process.env.NOTION_CLIENT_SECRET ?? ""),
     },
   },
   preload: {

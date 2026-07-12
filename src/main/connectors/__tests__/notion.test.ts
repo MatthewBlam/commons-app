@@ -229,6 +229,8 @@ vi.mock("@notionhq/client", () => {
     isFullPage: (obj: any) => obj?.object === "page" && "url" in obj,
     isFullDatabase: (obj: any) =>
       obj?.object === "database" && "data_sources" in obj,
+    isFullDataSource: (obj: any) =>
+      obj?.object === "data_source" && "title" in obj,
     LogLevel: { DEBUG: "debug", INFO: "info", WARN: "warn", ERROR: "error" },
   };
 });
@@ -516,30 +518,44 @@ describe("listNotionItems", () => {
     vi.clearAllMocks();
   });
 
-  it("returns only workspace-parented pages at root level, sorted alphabetically", async () => {
-    const workspacePage = makePage("aaa-bbb", "Zebra Page");
-    const workspacePage2 = makePage("ccc-ddd", "Alpha Page");
-    const dbPage = {
-      ...makePage("eee-fff", "DB Child"),
-      parent: { type: "database_id", database_id: "db-1" },
+  it("returns all pages and databases sorted alphabetically", async () => {
+    const page1 = makePage("aaa-bbb", "Zebra Page");
+    const page2 = makePage("ccc-ddd", "Alpha Page");
+    const nestedPage = {
+      ...makePage("eee-fff", "Nested Page"),
+      parent: { type: "page_id", page_id: "ccc-ddd" },
     };
 
-    mockClient.search.mockResolvedValue({
-      results: [workspacePage, dbPage, workspacePage2],
-      has_more: false,
-      next_cursor: null,
-    });
+    mockClient.search
+      .mockResolvedValueOnce({
+        results: [page1, nestedPage, page2],
+        has_more: false,
+        next_cursor: null,
+      })
+      .mockResolvedValueOnce({
+        results: [{
+          object: "data_source",
+          id: "ggg-hhh",
+          title: [{ plain_text: "My Database", type: "text" }],
+          database_parent: { type: "workspace", workspace: true },
+          icon: { type: "emoji", emoji: "📊" },
+        }],
+        has_more: false,
+        next_cursor: null,
+      });
 
     const items = await listNotionItems("test-token");
 
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(4);
     expect(items[0].title).toBe("Alpha Page");
-    expect(items[1].title).toBe("Zebra Page");
-    expect(items[0].id).toBe("cccddd");
-    expect(items[1].id).toBe("aaabbb");
+    expect(items[1].title).toBe("My Database");
+    expect(items[1].isDatabase).toBe(true);
+    expect(items[1].icon).toBe("📊");
+    expect(items[2].title).toBe("Nested Page");
+    expect(items[3].title).toBe("Zebra Page");
   });
 
-  it("paginates root-level search results", async () => {
+  it("paginates search results", async () => {
     const page1 = makePage("aaa-bbb", "Page A");
     const page2 = makePage("ccc-ddd", "Page B");
 
@@ -553,116 +569,81 @@ describe("listNotionItems", () => {
         results: [page2],
         has_more: false,
         next_cursor: null,
+      })
+      .mockResolvedValueOnce({
+        results: [],
+        has_more: false,
+        next_cursor: null,
       });
 
     const items = await listNotionItems("test-token");
 
     expect(items).toHaveLength(2);
-    expect(mockClient.search).toHaveBeenCalledTimes(2);
+    expect(mockClient.search).toHaveBeenCalledTimes(3);
   });
 
-  it("extracts emoji icon from root pages", async () => {
+  it("extracts emoji icon from pages", async () => {
     const page = {
       ...makePage("aaa-bbb", "Fun Page"),
       icon: { type: "emoji", emoji: "🎉" },
     };
 
-    mockClient.search.mockResolvedValue({
-      results: [page],
-      has_more: false,
-      next_cursor: null,
-    });
+    mockClient.search
+      .mockResolvedValueOnce({
+        results: [page],
+        has_more: false,
+        next_cursor: null,
+      })
+      .mockResolvedValueOnce({
+        results: [],
+        has_more: false,
+        next_cursor: null,
+      });
 
     const items = await listNotionItems("test-token");
 
     expect(items[0].icon).toBe("🎉");
   });
 
-  it("returns only child_page blocks at child level, sorted alphabetically", async () => {
-    const childPage1 = {
-      ...makeBlock("child_page", { title: "Zeta" }),
-      id: "aaa-bbb-ccc",
-      type: "child_page",
-      child_page: { title: "Zeta" },
-    };
-    const childPage2 = {
-      ...makeBlock("child_page", { title: "Alpha" }),
-      id: "ddd-eee-fff",
-      type: "child_page",
-      child_page: { title: "Alpha" },
-    };
-    const paragraph = makeBlock("paragraph", {
-      rich_text: makeRichText("Text"),
-    });
-
-    mockClient.blocks.children.list.mockResolvedValue({
-      results: [childPage1, paragraph, childPage2],
-      has_more: false,
-      next_cursor: null,
-    });
-
-    const items = await listNotionItems("test-token", "parent-id");
-
-    expect(items).toHaveLength(2);
-    expect(items[0].title).toBe("Alpha");
-    expect(items[1].title).toBe("Zeta");
-    expect(items[0].id).toBe("dddeeefff");
-    expect(items[0].icon).toBeNull();
-  });
-
-  it("paginates child-level block results", async () => {
-    const child1 = {
-      ...makeBlock("child_page", { title: "Page 1" }),
-      id: "aaa",
-      type: "child_page",
-      child_page: { title: "Page 1" },
-    };
-    const child2 = {
-      ...makeBlock("child_page", { title: "Page 2" }),
-      id: "bbb",
-      type: "child_page",
-      child_page: { title: "Page 2" },
-    };
-
-    mockClient.blocks.children.list
+  it("returns empty array when no pages or databases exist", async () => {
+    mockClient.search
       .mockResolvedValueOnce({
-        results: [child1],
-        has_more: true,
-        next_cursor: "cursor-1",
+        results: [],
+        has_more: false,
+        next_cursor: null,
       })
       .mockResolvedValueOnce({
-        results: [child2],
+        results: [],
         has_more: false,
         next_cursor: null,
       });
-
-    const items = await listNotionItems("test-token", "parent-id");
-
-    expect(items).toHaveLength(2);
-    expect(mockClient.blocks.children.list).toHaveBeenCalledTimes(2);
-  });
-
-  it("returns empty array for root level with no workspace pages", async () => {
-    mockClient.search.mockResolvedValue({
-      results: [],
-      has_more: false,
-      next_cursor: null,
-    });
 
     const items = await listNotionItems("test-token");
     expect(items).toEqual([]);
   });
 
-  it("returns empty array for child level with no child pages", async () => {
-    mockClient.blocks.children.list.mockResolvedValue({
-      results: [
-        makeBlock("paragraph", { rich_text: makeRichText("Just text") }),
-      ],
-      has_more: false,
-      next_cursor: null,
-    });
+  it("deduplicates pages across paginated results", async () => {
+    const page = makePage("aaa-bbb", "Duplicate Page");
 
-    const items = await listNotionItems("test-token", "leaf-page-id");
-    expect(items).toEqual([]);
+    mockClient.search
+      .mockResolvedValueOnce({
+        results: [page],
+        has_more: true,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        results: [page],
+        has_more: false,
+        next_cursor: null,
+      })
+      .mockResolvedValueOnce({
+        results: [],
+        has_more: false,
+        next_cursor: null,
+      });
+
+    const items = await listNotionItems("test-token");
+
+    expect(items).toHaveLength(1);
   });
 });

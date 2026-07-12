@@ -1,5 +1,16 @@
-import { Client, isFullPage, isFullDatabase, LogLevel } from "@notionhq/client";
-import type { BlockObjectResponse, PageObjectResponse, RichTextItemResponse } from "@notionhq/client/build/src/api-endpoints";
+import {
+  Client,
+  isFullPage,
+  isFullDatabase,
+  isFullDataSource,
+  LogLevel,
+} from "@notionhq/client";
+import type {
+  BlockObjectResponse,
+  DataSourceObjectResponse,
+  PageObjectResponse,
+  RichTextItemResponse,
+} from "@notionhq/client/build/src/api-endpoints";
 import type { Connector, RawDocument } from "../sync/sync-manager";
 import type { NotionItemSummary } from "../../shared/types";
 
@@ -13,48 +24,72 @@ export class NotionConnector implements Connector {
   private lastRequestTime = 0;
   private throttleMs: number;
 
-  constructor(token: string, rootPageId: string, throttleMs = DEFAULT_THROTTLE_MS) {
+  constructor(
+    token: string,
+    rootPageId: string,
+    throttleMs = DEFAULT_THROTTLE_MS,
+  ) {
     this.client = new Client({ auth: token, logLevel: LogLevel.ERROR });
     this.rootPageId = rootPageId;
     this.throttleMs = throttleMs;
   }
 
-  async *fetchDocuments(): AsyncGenerator<RawDocument> {
-    yield* this.walkPage(this.rootPageId, 0);
+  async *fetchDocuments(
+    _signal?: AbortSignal,
+    knownDocs?: Map<string, string>,
+  ): AsyncGenerator<RawDocument> {
+    yield* this.walkPage(this.rootPageId, 0, new Set(), knownDocs);
   }
 
-  private async *walkPage(pageId: string, depth: number): AsyncGenerator<RawDocument> {
-    if (depth > MAX_DEPTH) return;
+  private async *walkPage(
+    pageId: string,
+    depth: number,
+    visited: Set<string>,
+    knownDocs?: Map<string, string>,
+  ): AsyncGenerator<RawDocument> {
+    if (depth > MAX_DEPTH || visited.has(pageId)) return;
+    visited.add(pageId);
 
-    const page = (await this.rateLimited(() => this.client.pages.retrieve({ page_id: pageId }))) as PageObjectResponse;
+    const page = (await this.rateLimited(() =>
+      this.client.pages.retrieve({ page_id: pageId }),
+    )) as PageObjectResponse;
 
     const title = extractPageTitle(page);
     const url = page.url ?? null;
-    const blocks = await this.fetchAllBlocks(pageId);
-    const content = blocksToText(blocks);
+    const unchanged = knownDocs?.get(pageId) === page.last_edited_time;
 
-    if (content.trim()) {
-      yield {
-        externalId: pageId,
-        title,
-        url,
-        mimeType: "text/plain",
-        modifiedAt: page.last_edited_time ?? null,
-        content,
-      };
+    const blocks = await this.fetchAllBlocks(pageId);
+
+    if (!unchanged) {
+      const content = blocksToText(blocks);
+      if (content.trim()) {
+        yield {
+          externalId: pageId,
+          title,
+          url,
+          mimeType: "text/plain",
+          modifiedAt: page.last_edited_time ?? null,
+          content,
+        };
+      }
     }
 
     for (const block of blocks) {
       if (block.type === "child_page") {
-        yield* this.walkPage(block.id, depth + 1);
+        yield* this.walkPage(block.id, depth + 1, visited, knownDocs);
       }
       if (block.type === "child_database") {
         try {
-          yield* this.walkDatabase(block.id, depth + 1);
+          yield* this.walkDatabase(block.id, depth + 1, visited, knownDocs);
         } catch (err) {
-          const status = err instanceof Object && "status" in err ? (err as { status: number }).status : 0;
+          const status =
+            err instanceof Object && "status" in err
+              ? (err as { status: number }).status
+              : 0;
           if (status === 403 || status === 404) {
-            console.warn(`Skipping database ${block.id}: ${status} (not shared or not found)`);
+            console.warn(
+              `Skipping database ${block.id}: ${status} (not shared or not found)`,
+            );
             continue;
           }
           throw err;
@@ -63,7 +98,12 @@ export class NotionConnector implements Connector {
     }
   }
 
-  private async *walkDatabase(databaseId: string, depth: number): AsyncGenerator<RawDocument> {
+  private async *walkDatabase(
+    databaseId: string,
+    depth: number,
+    visited: Set<string>,
+    knownDocs?: Map<string, string>,
+  ): AsyncGenerator<RawDocument> {
     if (depth > MAX_DEPTH) return;
 
     const dataSourceId = await this.resolveDataSourceId(databaseId);
@@ -80,23 +120,30 @@ export class NotionConnector implements Connector {
 
       for (const result of response.results) {
         if ("url" in result) {
-          yield* this.walkPage(result.id, depth + 1);
+          yield* this.walkPage(result.id, depth + 1, visited, knownDocs);
         }
       }
 
-      cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+      cursor = response.has_more
+        ? (response.next_cursor ?? undefined)
+        : undefined;
     } while (cursor);
   }
 
   private async resolveDataSourceId(databaseId: string): Promise<string> {
-    const db = await this.rateLimited(() => this.client.databases.retrieve({ database_id: databaseId }));
+    const db = await this.rateLimited(() =>
+      this.client.databases.retrieve({ database_id: databaseId }),
+    );
     if (isFullDatabase(db) && db.data_sources.length > 0) {
       return db.data_sources[0].id;
     }
     return databaseId;
   }
 
-  private async fetchAllBlocks(blockId: string, depth = 0): Promise<BlockObjectResponse[]> {
+  private async fetchAllBlocks(
+    blockId: string,
+    depth = 0,
+  ): Promise<BlockObjectResponse[]> {
     if (depth >= MAX_BLOCK_DEPTH) return [];
     const blocks: BlockObjectResponse[] = [];
     let cursor: string | undefined;
@@ -112,13 +159,19 @@ export class NotionConnector implements Connector {
         if ("type" in result) {
           const block = result as BlockObjectResponse;
           blocks.push(block);
-          if (block.has_children && block.type !== "child_page" && block.type !== "child_database") {
+          if (
+            block.has_children &&
+            block.type !== "child_page" &&
+            block.type !== "child_database"
+          ) {
             const children = await this.fetchAllBlocks(block.id, depth + 1);
             blocks.push(...children);
           }
         }
       }
-      cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+      cursor = response.has_more
+        ? (response.next_cursor ?? undefined)
+        : undefined;
     } while (cursor);
     return blocks;
   }
@@ -137,7 +190,10 @@ export class NotionConnector implements Connector {
     try {
       return await fn();
     } catch (err: unknown) {
-      const status = err instanceof Object && "status" in err ? (err as { status: number }).status : 0;
+      const status =
+        err instanceof Object && "status" in err
+          ? (err as { status: number }).status
+          : 0;
       if (status === 429 && retries > 0) {
         const delay = Math.pow(2, 3 - retries) * 1000;
         await new Promise((r) => setTimeout(r, delay));
@@ -202,7 +258,9 @@ function blockToLine(block: BlockObjectResponse): string | null {
     case "divider":
       return "---";
     case "table_row":
-      return block.table_row.cells.map((cell) => richTextToPlain(cell)).join(" | ");
+      return block.table_row.cells
+        .map((cell) => richTextToPlain(cell))
+        .join(" | ");
     case "image":
     case "video":
     case "embed":
@@ -215,44 +273,24 @@ function blockToLine(block: BlockObjectResponse): string | null {
   }
 }
 
-export async function listNotionItems(token: string, parentPageId?: string): Promise<NotionItemSummary[]> {
+export async function listNotionItems(
+  token: string,
+): Promise<NotionItemSummary[]> {
   const client = new Client({ auth: token, logLevel: LogLevel.ERROR });
 
-  if (parentPageId) {
-    const items: NotionItemSummary[] = [];
-    let cursor: string | undefined;
-    do {
-      const response = await client.blocks.children.list({
-        block_id: parentPageId,
-        start_cursor: cursor,
-        page_size: 100,
-      });
-      for (const block of response.results) {
-        if ("type" in block && (block as BlockObjectResponse).type === "child_page") {
-          const b = block as BlockObjectResponse & { child_page: { title: string } };
-          items.push({
-            id: block.id.replace(/-/g, ""),
-            title: b.child_page.title,
-            icon: null,
-          });
-        }
-      }
-      cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
-    } while (cursor);
-    items.sort((a, b) => a.title.localeCompare(b.title));
-    return items;
-  }
-
+  const seen = new Set<string>();
   const items: NotionItemSummary[] = [];
-  let cursor: string | undefined;
+
+  let pageCursor: string | undefined;
   do {
     const response = await client.search({
       filter: { property: "object", value: "page" },
-      start_cursor: cursor,
+      start_cursor: pageCursor,
       page_size: 100,
     });
     for (const result of response.results) {
-      if (isFullPage(result) && result.parent.type === "workspace") {
+      if (isFullPage(result) && !seen.has(result.id)) {
+        seen.add(result.id);
         items.push({
           id: result.id.replace(/-/g, ""),
           title: extractPageTitle(result),
@@ -260,9 +298,36 @@ export async function listNotionItems(token: string, parentPageId?: string): Pro
         });
       }
     }
-    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
-  } while (cursor);
+    pageCursor = response.has_more
+      ? (response.next_cursor ?? undefined)
+      : undefined;
+  } while (pageCursor);
+
+  let dbCursor: string | undefined;
+  do {
+    const response = await client.search({
+      filter: { property: "object", value: "data_source" },
+      start_cursor: dbCursor,
+      page_size: 100,
+    });
+    for (const result of response.results) {
+      if (isFullDataSource(result) && !seen.has(result.id)) {
+        seen.add(result.id);
+        const ds = result as DataSourceObjectResponse;
+        const title = ds.title.map((t) => t.plain_text).join("") || "Untitled";
+        items.push({
+          id: result.id.replace(/-/g, ""),
+          title,
+          icon: ds.icon?.type === "emoji" ? ds.icon.emoji : null,
+          isDatabase: true,
+        });
+      }
+    }
+    dbCursor = response.has_more
+      ? (response.next_cursor ?? undefined)
+      : undefined;
+  } while (dbCursor);
+
   items.sort((a, b) => a.title.localeCompare(b.title));
   return items;
 }
-

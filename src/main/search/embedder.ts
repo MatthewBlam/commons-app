@@ -14,6 +14,9 @@ const OLLAMA_TIMEOUT_MS = 120_000;
 const COHERE_MAX_RETRIES = 3;
 const COHERE_RETRY_BACKOFF = [1000, 2000, 4000];
 
+const COHERE_EMBED_CONCURRENCY = 3;
+const OLLAMA_EMBED_CONCURRENCY = 2;
+
 interface CohereEmbedResponse {
   embeddings: {
     float: number[][];
@@ -22,6 +25,20 @@ interface CohereEmbedResponse {
 
 interface OllamaEmbedResponse {
   embeddings: number[][];
+}
+
+async function runConcurrent<T>(
+  items: T[],
+  fn: (item: T) => Promise<void>,
+  limit: number,
+): Promise<void> {
+  const active = new Set<Promise<void>>();
+  for (const item of items) {
+    const p = fn(item).finally(() => active.delete(p));
+    active.add(p);
+    if (active.size >= limit) await Promise.race(active);
+  }
+  await Promise.all(active);
 }
 
 function isRetryableStatus(status: number): boolean {
@@ -34,24 +51,37 @@ async function fetchWithRetry(
   timeoutMs: number,
   maxRetries: number,
   backoffMs: number[],
+  signal?: AbortSignal,
 ): Promise<Response> {
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const res = await fetch(url, {
-      ...init,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    try {
+      const signals = [AbortSignal.timeout(timeoutMs)];
+      if (signal) signals.push(signal);
+      const res = await fetch(url, {
+        ...init,
+        signal: AbortSignal.any(signals),
+      });
 
-    if (res.ok) return res;
+      if (res.ok) return res;
 
-    if (isRetryableStatus(res.status) && attempt < maxRetries) {
-      lastError = new Error(`${res.status} ${res.statusText}`);
-      await new Promise((r) => setTimeout(r, backoffMs[attempt]));
-      continue;
+      if (isRetryableStatus(res.status) && attempt < maxRetries) {
+        lastError = new Error(`${res.status} ${res.statusText}`);
+        await new Promise((r) => setTimeout(r, backoffMs[attempt]));
+        continue;
+      }
+
+      return res;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, backoffMs[attempt]));
+        continue;
+      }
     }
-
-    return res;
   }
 
   throw lastError;
@@ -61,40 +91,56 @@ async function embedWithCohere(
   texts: string[],
   inputType: "search_document" | "search_query",
   apiKey: string,
+  signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-  const results: Float32Array[] = [];
-
+  const batches: { start: number; texts: string[] }[] = [];
   for (let i = 0; i < texts.length; i += COHERE_BATCH_SIZE) {
-    const batch = texts.slice(i, i + COHERE_BATCH_SIZE);
-    const res = await fetchWithRetry(
-      "https://api.cohere.com/v2/embed",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: COHERE_MODEL,
-          texts: batch,
-          input_type: inputType,
-          embedding_types: ["float"],
-        }),
-      },
-      COHERE_TIMEOUT_MS,
-      COHERE_MAX_RETRIES,
-      COHERE_RETRY_BACKOFF,
-    );
-
-    if (!res.ok) {
-      throw new Error(`Cohere embed failed: ${res.status} ${res.statusText}`);
-    }
-
-    const data = (await res.json()) as CohereEmbedResponse;
-    for (const emb of data.embeddings.float) {
-      results.push(new Float32Array(emb));
-    }
+    batches.push({ start: i, texts: texts.slice(i, i + COHERE_BATCH_SIZE) });
   }
+
+  const results = new Array<Float32Array>(texts.length);
+
+  await runConcurrent(
+    batches,
+    async (batch) => {
+      if (signal?.aborted) return;
+      const res = await fetchWithRetry(
+        "https://api.cohere.com/v2/embed",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: COHERE_MODEL,
+            texts: batch.texts,
+            input_type: inputType,
+            embedding_types: ["float"],
+          }),
+        },
+        COHERE_TIMEOUT_MS,
+        COHERE_MAX_RETRIES,
+        COHERE_RETRY_BACKOFF,
+        signal,
+      );
+
+      if (!res.ok) {
+        throw new Error(`Cohere embed failed: ${res.status} ${res.statusText}`);
+      }
+
+      const data = (await res.json()) as CohereEmbedResponse;
+      if (data.embeddings.float.length !== batch.texts.length) {
+        throw new Error(
+          `Cohere returned ${data.embeddings.float.length} embeddings for ${batch.texts.length} texts`,
+        );
+      }
+      for (let j = 0; j < data.embeddings.float.length; j++) {
+        results[batch.start + j] = new Float32Array(data.embeddings.float[j]);
+      }
+    },
+    COHERE_EMBED_CONCURRENCY,
+  );
 
   return results;
 }
@@ -102,27 +148,48 @@ async function embedWithCohere(
 async function embedWithOllama(
   texts: string[],
   model: string,
+  signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-  const results: Float32Array[] = [];
-
+  const batches: { start: number; texts: string[] }[] = [];
   for (let i = 0; i < texts.length; i += OLLAMA_BATCH_SIZE) {
-    const batch = texts.slice(i, i + OLLAMA_BATCH_SIZE);
-    const res = await fetch("http://localhost:11434/api/embed", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, input: batch }),
-      signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
-    });
-
-    if (!res.ok) {
-      throw new Error(`Ollama embed failed: ${res.status} ${res.statusText}`);
-    }
-
-    const data = (await res.json()) as OllamaEmbedResponse;
-    for (const emb of data.embeddings) {
-      results.push(new Float32Array(emb));
-    }
+    batches.push({ start: i, texts: texts.slice(i, i + OLLAMA_BATCH_SIZE) });
   }
+
+  const results = new Array<Float32Array>(texts.length);
+
+  await runConcurrent(
+    batches,
+    async (batch) => {
+      if (signal?.aborted) return;
+      const res = await fetchWithRetry(
+        "http://localhost:11434/api/embed",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, input: batch.texts }),
+        },
+        OLLAMA_TIMEOUT_MS,
+        COHERE_MAX_RETRIES,
+        COHERE_RETRY_BACKOFF,
+        signal,
+      );
+
+      if (!res.ok) {
+        throw new Error(`Ollama embed failed: ${res.status} ${res.statusText}`);
+      }
+
+      const data = (await res.json()) as OllamaEmbedResponse;
+      if (data.embeddings.length !== batch.texts.length) {
+        throw new Error(
+          `Ollama returned ${data.embeddings.length} embeddings for ${batch.texts.length} texts`,
+        );
+      }
+      for (let j = 0; j < data.embeddings.length; j++) {
+        results[batch.start + j] = new Float32Array(data.embeddings[j]);
+      }
+    },
+    OLLAMA_EMBED_CONCURRENCY,
+  );
 
   return results;
 }
@@ -130,19 +197,25 @@ async function embedWithOllama(
 export async function embedDocuments(
   texts: string[],
   config: EmbedConfig,
+  signal?: AbortSignal,
 ): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
 
   if (config.provider === "cohere") {
     if (!config.apiKey) throw new Error("Cohere API key required");
-    return embedWithCohere(texts, "search_document", config.apiKey);
+    return embedWithCohere(texts, "search_document", config.apiKey, signal);
   }
-  return embedWithOllama(texts, config.ollamaModel ?? DEFAULT_OLLAMA_MODEL);
+  return embedWithOllama(
+    texts,
+    config.ollamaModel ?? DEFAULT_OLLAMA_MODEL,
+    signal,
+  );
 }
 
 export async function embedQuery(
   text: string,
   config: EmbedConfig,
+  signal?: AbortSignal,
 ): Promise<Float32Array> {
   if (config.provider === "cohere") {
     if (!config.apiKey) throw new Error("Cohere API key required");
@@ -150,12 +223,14 @@ export async function embedQuery(
       [text],
       "search_query",
       config.apiKey,
+      signal,
     );
     return result;
   }
   const [result] = await embedWithOllama(
     [text],
     config.ollamaModel ?? DEFAULT_OLLAMA_MODEL,
+    signal,
   );
   return result;
 }
@@ -168,7 +243,13 @@ export function getEmbeddingModelName(config: EmbedConfig): string {
 
 export function embeddingToBuffer(embedding: Float32Array): Buffer {
   const copy = Buffer.alloc(embedding.byteLength);
-  copy.set(new Uint8Array(embedding.buffer, embedding.byteOffset, embedding.byteLength));
+  copy.set(
+    new Uint8Array(
+      embedding.buffer,
+      embedding.byteOffset,
+      embedding.byteLength,
+    ),
+  );
   return copy;
 }
 

@@ -83,6 +83,12 @@ export async function startGoogleOAuth(
     activeReject = (err) => safeReject(err);
 
     const server = http.createServer(async (req, res) => {
+      if (settled) {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+
       try {
         const url = new URL(req.url!, `http://localhost:${REDIRECT_PORT}`);
 
@@ -117,13 +123,13 @@ export async function startGoogleOAuth(
         const { tokens } = await client.getToken({ code, codeVerifier });
         client.setCredentials(tokens);
 
-        saveSecret(db, "google_tokens", JSON.stringify(tokens));
-
         const infoRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
           headers: { Authorization: `Bearer ${tokens.access_token}` },
         });
         const userInfo = (await infoRes.json()) as { email?: string };
         const email = userInfo.email ?? "Unknown";
+
+        saveSecret(db, "google_tokens", JSON.stringify(tokens));
 
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(
@@ -190,11 +196,18 @@ export async function refreshIfNeeded(
       const { credentials } = await client.refreshAccessToken();
       client.setCredentials(credentials);
       saveSecret(db, "google_tokens", JSON.stringify(credentials));
-    } catch {
-      deleteSecret(db, "google_tokens");
-      throw new Error(
-        "Google session expired — please re-authenticate in Settings.",
-      );
+    } catch (err) {
+      const status =
+        err instanceof Object && "status" in err
+          ? (err as { status: number }).status
+          : 0;
+      if (status === 400 || status === 401) {
+        deleteSecret(db, "google_tokens");
+        throw new Error(
+          "Google session expired — please re-authenticate in Settings.",
+        );
+      }
+      throw err;
     }
   }
 }

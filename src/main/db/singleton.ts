@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { app } from "electron";
 import { join } from "node:path";
-import { existsSync, copyFileSync, renameSync } from "node:fs";
+import { renameSync } from "node:fs";
 import { runMigrations } from "./migrations";
 
 let _db: Database.Database | null = null;
@@ -27,15 +27,7 @@ export function getDb(): Database.Database {
   _db.pragma("foreign_keys = ON");
   _db.pragma("busy_timeout = 5000");
 
-  if (existsSync(dbPath)) {
-    try {
-      copyFileSync(dbPath, `${dbPath}.pre-migration.bak`);
-    } catch {
-      // non-fatal — best-effort backup
-    }
-  }
-
-  runMigrations(_db);
+  runMigrations(_db, dbPath);
   return _db;
 }
 

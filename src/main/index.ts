@@ -5,16 +5,18 @@ import started from "electron-squirrel-startup";
 import icon from "../../resources/icon.png?asset";
 import { registerIpcHandlers } from "./ipc/handlers";
 import { registerSyncHandlers, cancelAllSyncs } from "./ipc/sync-handlers";
-import { closeDb } from "./db/singleton";
+import { syncScheduler } from "./sync/scheduler";
+import { getDb, closeDb } from "./db/singleton";
+import { resetStalePendingDocuments } from "./db/database";
 
 if (started) app.quit();
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
     width: 1000,
-    height: 700,
+    height: 750,
     minWidth: 800,
-    minHeight: 675,
+    minHeight: 750,
     show: false,
     autoHideMenuBar: true,
     frame: false,
@@ -26,6 +28,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
     },
   });
 
@@ -56,10 +59,6 @@ function createWindow(): void {
 app
   .whenReady()
   .then(async () => {
-    if (!app.isPackaged) {
-      await import("dotenv/config");
-    }
-
     electronApp.setAppUserModelId("com.commons.app");
 
     app.on("browser-window-created", (_, window) => {
@@ -92,6 +91,12 @@ app
 
     registerIpcHandlers();
     registerSyncHandlers();
+    const db = getDb();
+    const staleCount = resetStalePendingDocuments(db);
+    if (staleCount > 0) {
+      console.log(`Reset ${staleCount} stale pending documents to error status`);
+    }
+    syncScheduler.start(db);
     createWindow();
 
     app.on("activate", () => {
@@ -111,5 +116,6 @@ app.on("window-all-closed", () => {
 
 app.on("will-quit", () => {
   cancelAllSyncs();
+  syncScheduler.stop();
   closeDb();
 });

@@ -11,9 +11,7 @@ interface CommonsAPI {
   search(query: string): Promise<import("../shared/types").SearchResponse>;
   startNotionOAuth(): Promise<{ workspaceName: string }>;
   cancelNotionOAuth(): Promise<void>;
-  listNotionPages(
-    parentPageId?: string,
-  ): Promise<import("../shared/types").NotionItemSummary[]>;
+  listNotionPages(): Promise<import("../shared/types").NotionItemSummary[]>;
   startGoogleOAuth(): Promise<{ email: string }>;
   cancelGoogleOAuth(): Promise<void>;
   listDriveItems(
@@ -38,6 +36,10 @@ interface CommonsAPI {
   clearAllData(): Promise<void>;
   checkEmbeddingHealth(): Promise<import("../shared/types").EmbeddingHealth>;
   deleteSecret(key: string): Promise<void>;
+  hasSecret(key: string): Promise<boolean>;
+  getAutoSync(): Promise<{ enabled: boolean; intervalMs: number; lastSyncedAt: string | null; syncing: boolean }>;
+  setAutoSyncEnabled(enabled: boolean): Promise<void>;
+  setAutoSyncInterval(ms: number): Promise<void>;
 }
 
 interface ElectronDrag {

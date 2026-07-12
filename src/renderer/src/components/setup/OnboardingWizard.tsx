@@ -137,7 +137,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps): React.J
             )}
 
             <div className="flex gap-2 pt-2">
-              <Button variant="ghost" size="xs" onClick={() => setStep("provider")}>
+              <Button variant="ghost" size="xs" onClick={() => { setProviderMode("choose"); setStep("provider"); }}>
                 &larr; Back
               </Button>
               <Button variant="outline" size="sm" onClick={() => setStep("done")}>

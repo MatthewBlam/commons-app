@@ -6,6 +6,7 @@ import {
   getDocumentsBySourceId,
   getChunksByDocumentId,
   getDocumentByExternalId,
+  getIncrementalSyncMap,
 } from "../../db/database";
 import { syncSource, type Connector, type RawDocument } from "../sync-manager";
 import type { EmbedConfig } from "../../search/embedder";
@@ -23,7 +24,10 @@ vi.mock("../../search/embedder", () => ({
 
 function makeConnector(docs: RawDocument[]): Connector {
   return {
-    async *fetchDocuments() {
+    async *fetchDocuments(
+      _signal?: AbortSignal,
+      _knownDocs?: Map<string, string>,
+    ) {
       for (const doc of docs) {
         yield doc;
       }
@@ -36,7 +40,16 @@ const testConfig: EmbedConfig = { provider: "cohere", apiKey: "test-key" };
 describe("syncSource", () => {
   let db: Database.Database;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    const embedder = await import("../../search/embedder");
+    (embedder.embedDocuments as ReturnType<typeof vi.fn>).mockImplementation(
+      async (texts: string[]) => texts.map(() => new Float32Array([0.1, 0.2, 0.3])),
+    );
+    (embedder.getEmbeddingModelName as ReturnType<typeof vi.fn>).mockReturnValue("embed-v4.0");
+    (embedder.embeddingToBuffer as ReturnType<typeof vi.fn>).mockImplementation(
+      (emb: Float32Array) => Buffer.from(emb.buffer, emb.byteOffset, emb.byteLength),
+    );
+
     db = new Database(":memory:");
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
@@ -383,5 +396,170 @@ describe("syncSource", () => {
     const docs = getDocumentsBySourceId(db, "src-1");
     expect(docs).toHaveLength(3);
     expect(docs.every((d) => d.syncStatus === "synced")).toBe(true);
+  });
+
+  it("skips documents via incremental sync when modifiedAt matches", async () => {
+    const connector1 = makeConnector([
+      {
+        externalId: "doc-ext-1",
+        title: "Doc",
+        url: null,
+        mimeType: null,
+        modifiedAt: "2026-01-01T00:00:00Z",
+        content: "# Section\nSome content here.",
+      },
+    ]);
+
+    await syncSource(db, "src-1", "notion", connector1, testConfig, () => {});
+
+    const syncMap = getIncrementalSyncMap(db, "src-1", "embed-v4.0");
+    expect(syncMap.get("doc-ext-1")).toBe("2026-01-01T00:00:00Z");
+
+    const { embedDocuments } = await import("../../search/embedder");
+    (embedDocuments as ReturnType<typeof vi.fn>).mockClear();
+
+    const connector2 = makeConnector([
+      {
+        externalId: "doc-ext-1",
+        title: "Doc",
+        url: null,
+        mimeType: null,
+        modifiedAt: "2026-01-01T00:00:00Z",
+        content: "# Section\nSome content here.",
+      },
+    ]);
+
+    await syncSource(db, "src-1", "notion", connector2, testConfig, () => {});
+    expect(embedDocuments).not.toHaveBeenCalled();
+  });
+
+  it("re-processes documents when modifiedAt differs", async () => {
+    const connector1 = makeConnector([
+      {
+        externalId: "doc-ext-1",
+        title: "Doc",
+        url: null,
+        mimeType: null,
+        modifiedAt: "2026-01-01T00:00:00Z",
+        content: "# Section\nOriginal content.",
+      },
+    ]);
+
+    await syncSource(db, "src-1", "notion", connector1, testConfig, () => {});
+
+    const { embedDocuments } = await import("../../search/embedder");
+    (embedDocuments as ReturnType<typeof vi.fn>).mockClear();
+
+    const connector2 = makeConnector([
+      {
+        externalId: "doc-ext-1",
+        title: "Doc",
+        url: null,
+        mimeType: null,
+        modifiedAt: "2026-01-02T00:00:00Z",
+        content: "# Section\nUpdated content.",
+      },
+    ]);
+
+    await syncSource(db, "src-1", "notion", connector2, testConfig, () => {});
+    expect(embedDocuments).toHaveBeenCalled();
+  });
+
+  it("reports skipped count in progress events", async () => {
+    const connector1 = makeConnector([
+      {
+        externalId: "doc-1",
+        title: "Doc 1",
+        url: null,
+        mimeType: null,
+        modifiedAt: "2026-01-01T00:00:00Z",
+        content: "# Heading\nContent one.",
+      },
+      {
+        externalId: "doc-2",
+        title: "Doc 2",
+        url: null,
+        mimeType: null,
+        modifiedAt: "2026-01-01T00:00:00Z",
+        content: "# Heading\nContent two.",
+      },
+    ]);
+
+    await syncSource(db, "src-1", "notion", connector1, testConfig, () => {});
+
+    const progress: SyncProgress[] = [];
+    const connector2 = makeConnector([
+      {
+        externalId: "doc-3",
+        title: "Doc 3",
+        url: null,
+        mimeType: null,
+        modifiedAt: null,
+        content: "# Heading\nNew content.",
+      },
+    ]);
+
+    await syncSource(db, "src-1", "notion", connector2, testConfig, (p) =>
+      progress.push(p),
+    );
+
+    const last = progress[progress.length - 1];
+    expect(last.skipped).toBe(2);
+  });
+
+  it("incremental sync map excludes docs with wrong embedding model", async () => {
+    const connector = makeConnector([
+      {
+        externalId: "doc-ext-1",
+        title: "Doc",
+        url: null,
+        mimeType: null,
+        modifiedAt: "2026-01-01T00:00:00Z",
+        content: "# Section\nSome content here.",
+      },
+    ]);
+
+    await syncSource(db, "src-1", "notion", connector, testConfig, () => {});
+
+    const mapWithCurrentModel = getIncrementalSyncMap(db, "src-1", "embed-v4.0");
+    expect(mapWithCurrentModel.has("doc-ext-1")).toBe(true);
+
+    const mapWithNewModel = getIncrementalSyncMap(db, "src-1", "new-model-v2");
+    expect(mapWithNewModel.has("doc-ext-1")).toBe(false);
+  });
+
+  it("processes documents concurrently", async () => {
+    const { embedDocuments } = await import("../../search/embedder");
+    const callTimestamps: number[] = [];
+    (embedDocuments as ReturnType<typeof vi.fn>).mockImplementation(
+      async (texts: string[]) => {
+        callTimestamps.push(Date.now());
+        await new Promise((r) => setTimeout(r, 50));
+        return texts.map(() => new Float32Array([0.1, 0.2, 0.3]));
+      },
+    );
+
+    const connector = makeConnector(
+      Array.from({ length: 6 }, (_, i) => ({
+        externalId: `doc-${i}`,
+        title: `Doc ${i}`,
+        url: null,
+        mimeType: null,
+        modifiedAt: null,
+        content: `# Heading ${i}\nContent for document ${i}.`,
+      })),
+    );
+
+    await syncSource(db, "src-1", "notion", connector, testConfig, () => {});
+
+    const docs = getDocumentsBySourceId(db, "src-1");
+    expect(docs).toHaveLength(6);
+    expect(docs.every((d) => d.syncStatus === "synced")).toBe(true);
+
+    // With concurrency=3, some embed calls should overlap in time
+    if (callTimestamps.length >= 3) {
+      const firstThreeSpread = callTimestamps[2] - callTimestamps[0];
+      expect(firstThreeSpread).toBeLessThan(50);
+    }
   });
 });

@@ -34,7 +34,10 @@ export class DriveConnector implements Connector {
     try {
       return await fn();
     } catch (err: unknown) {
-      const status = err instanceof Object && "status" in err ? (err as { status: number }).status : 0;
+      const status =
+        err instanceof Object && "status" in err
+          ? (err as { status: number }).status
+          : 0;
       if (status === 429 && retries > 0) {
         const delay = Math.pow(2, 3 - retries) * 1000;
         await new Promise((r) => setTimeout(r, delay));
@@ -44,22 +47,28 @@ export class DriveConnector implements Connector {
     }
   }
 
-  async *fetchDocuments(): AsyncGenerator<RawDocument> {
+  async *fetchDocuments(
+    _signal?: AbortSignal,
+    knownDocs?: Map<string, string>,
+  ): AsyncGenerator<RawDocument> {
     if (this.folderId === SHARED_WITH_ME_ID) {
-      yield* this.walkSharedWithMe();
+      yield* this.walkSharedWithMe(knownDocs);
     } else {
-      yield* this.walkFolder(this.folderId, 0, new Set());
+      yield* this.walkFolder(this.folderId, 0, new Set(), knownDocs);
     }
   }
 
-  private async *walkSharedWithMe(): AsyncGenerator<RawDocument> {
+  private async *walkSharedWithMe(
+    knownDocs?: Map<string, string>,
+  ): AsyncGenerator<RawDocument> {
     const visited = new Set<string>();
     let pageToken: string | undefined;
     do {
       const res = await this.rateLimited(() =>
         this.drive.files.list({
           q: "sharedWithMe = true and trashed = false",
-          fields: "nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size)",
+          fields:
+            "nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size)",
           pageSize: 100,
           pageToken,
           supportsAllDrives: true,
@@ -67,12 +76,17 @@ export class DriveConnector implements Connector {
         }),
       );
 
-      yield* this.processFiles(res.data.files ?? [], 0, visited);
+      yield* this.processFiles(res.data.files ?? [], 0, visited, knownDocs);
       pageToken = res.data.nextPageToken ?? undefined;
     } while (pageToken);
   }
 
-  private async *walkFolder(folderId: string, depth: number, visited: Set<string>): AsyncGenerator<RawDocument> {
+  private async *walkFolder(
+    folderId: string,
+    depth: number,
+    visited: Set<string>,
+    knownDocs?: Map<string, string>,
+  ): AsyncGenerator<RawDocument> {
     if (depth >= MAX_DEPTH || visited.has(folderId)) return;
     visited.add(folderId);
 
@@ -81,7 +95,8 @@ export class DriveConnector implements Connector {
       const res = await this.rateLimited(() =>
         this.drive.files.list({
           q: `'${folderId.replace(/'/g, "\\'")}' in parents and trashed = false`,
-          fields: "nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size)",
+          fields:
+            "nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size)",
           pageSize: 100,
           pageToken,
           supportsAllDrives: true,
@@ -89,7 +104,7 @@ export class DriveConnector implements Connector {
         }),
       );
 
-      yield* this.processFiles(res.data.files ?? [], depth, visited);
+      yield* this.processFiles(res.data.files ?? [], depth, visited, knownDocs);
       pageToken = res.data.nextPageToken ?? undefined;
     } while (pageToken);
   }
@@ -98,24 +113,34 @@ export class DriveConnector implements Connector {
     files: drive_v3.Schema$File[],
     depth: number,
     visited: Set<string>,
+    knownDocs?: Map<string, string>,
   ): AsyncGenerator<RawDocument> {
     for (const file of files) {
+      if (!file.id || !file.name) continue;
       if (file.mimeType === "application/vnd.google-apps.folder") {
-        yield* this.walkFolder(file.id!, depth + 1, visited);
+        yield* this.walkFolder(file.id, depth + 1, visited, knownDocs);
         continue;
       }
       if (file.size && Number(file.size) > MAX_FILE_SIZE) continue;
+      if (
+        knownDocs &&
+        file.modifiedTime &&
+        knownDocs.get(file.id) === file.modifiedTime
+      )
+        continue;
       let content: string | null;
       try {
         content = await this.extractContent(file);
       } catch (err) {
-        console.warn(`Skipping file "${file.name}" (${file.id}): ${err instanceof Error ? err.message : err}`);
+        console.warn(
+          `Skipping file "${file.name}" (${file.id}): ${err instanceof Error ? err.message : err}`,
+        );
         continue;
       }
       if (!content) continue;
       yield {
-        externalId: file.id!,
-        title: file.name!,
+        externalId: file.id,
+        title: file.name,
         url: file.webViewLink ?? null,
         mimeType: file.mimeType ?? null,
         modifiedAt: file.modifiedTime ?? null,
@@ -124,7 +149,9 @@ export class DriveConnector implements Connector {
     }
   }
 
-  private async extractContent(file: drive_v3.Schema$File): Promise<string | null> {
+  private async extractContent(
+    file: drive_v3.Schema$File,
+  ): Promise<string | null> {
     const mime = file.mimeType!;
 
     if (mime === "application/vnd.google-apps.document") {
@@ -158,7 +185,12 @@ export class DriveConnector implements Connector {
     }
 
     if (mime === "application/pdf") {
-      const res = await this.rateLimited(() => this.drive.files.get({ fileId: file.id!, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" }));
+      const res = await this.rateLimited(() =>
+        this.drive.files.get(
+          { fileId: file.id!, alt: "media", supportsAllDrives: true },
+          { responseType: "arraybuffer" },
+        ),
+      );
       cachedPdfParse ??= await import("pdf-parse");
       const parser = new cachedPdfParse.PDFParse({
         data: new Uint8Array(res.data as ArrayBuffer),
@@ -168,8 +200,16 @@ export class DriveConnector implements Connector {
       return result.text || null;
     }
 
-    if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
-      const res = await this.rateLimited(() => this.drive.files.get({ fileId: file.id!, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" }));
+    if (
+      mime ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ) {
+      const res = await this.rateLimited(() =>
+        this.drive.files.get(
+          { fileId: file.id!, alt: "media", supportsAllDrives: true },
+          { responseType: "arraybuffer" },
+        ),
+      );
       cachedMammoth ??= await import("mammoth");
       const result = await cachedMammoth.extractRawText({
         buffer: Buffer.from(res.data as ArrayBuffer),
@@ -199,22 +239,31 @@ export function extractFolderIdFromUrl(url: string): string | null {
 
 export const SHARED_WITH_ME_ID = "__shared_with_me__";
 
-export async function listDriveItems(auth: GoogleOAuth2Client, parentId?: string): Promise<{ id: string; name: string; isFolder: boolean }[]> {
+export async function listDriveItems(
+  auth: GoogleOAuth2Client,
+  parentId?: string,
+): Promise<{ id: string; name: string; isFolder: boolean }[]> {
   const driveClient = new drive_v3.Drive({ auth });
   const items: { id: string; name: string; isFolder: boolean }[] = [];
 
   if (!parentId) {
-    items.push({ id: SHARED_WITH_ME_ID, name: "Shared with me", isFolder: true });
+    items.push({
+      id: SHARED_WITH_ME_ID,
+      name: "Shared with me",
+      isFolder: true,
+    });
 
     let drivesPageToken: string | undefined;
     do {
+      await new Promise((r) => setTimeout(r, THROTTLE_MS));
       const drivesRes = await driveClient.drives.list({
         pageSize: 100,
         pageToken: drivesPageToken,
         fields: "nextPageToken, drives(id, name)",
       });
       for (const d of drivesRes.data.drives ?? []) {
-        items.push({ id: d.id!, name: d.name!, isFolder: true });
+        if (!d.id || !d.name) continue;
+        items.push({ id: d.id, name: d.name, isFolder: true });
       }
       drivesPageToken = drivesRes.data.nextPageToken ?? undefined;
     } while (drivesPageToken);
@@ -223,6 +272,7 @@ export async function listDriveItems(auth: GoogleOAuth2Client, parentId?: string
   if (parentId === SHARED_WITH_ME_ID) {
     let pageToken: string | undefined;
     do {
+      await new Promise((r) => setTimeout(r, THROTTLE_MS));
       const res = await driveClient.files.list({
         q: "sharedWithMe = true and trashed = false",
         fields: "nextPageToken, files(id, name, mimeType)",
@@ -232,9 +282,10 @@ export async function listDriveItems(auth: GoogleOAuth2Client, parentId?: string
         includeItemsFromAllDrives: true,
       });
       for (const file of res.data.files ?? []) {
+        if (!file.id || !file.name) continue;
         items.push({
-          id: file.id!,
-          name: file.name!,
+          id: file.id,
+          name: file.name,
           isFolder: file.mimeType === "application/vnd.google-apps.folder",
         });
       }
@@ -251,6 +302,7 @@ export async function listDriveItems(auth: GoogleOAuth2Client, parentId?: string
   let pageToken: string | undefined;
 
   do {
+    await new Promise((r) => setTimeout(r, THROTTLE_MS));
     const res = await driveClient.files.list({
       q: `'${parent.replace(/'/g, "\\'")}' in parents and trashed = false`,
       fields: "nextPageToken, files(id, name, mimeType)",
@@ -262,9 +314,10 @@ export async function listDriveItems(auth: GoogleOAuth2Client, parentId?: string
     });
 
     for (const file of res.data.files ?? []) {
+      if (!file.id || !file.name) continue;
       items.push({
-        id: file.id!,
-        name: file.name!,
+        id: file.id,
+        name: file.name,
         isFolder: file.mimeType === "application/vnd.google-apps.folder",
       });
     }

@@ -69,6 +69,12 @@ export async function startNotionOAuth(
     activeReject = (err) => safeReject(err);
 
     const server = http.createServer(async (req, res) => {
+      if (settled) {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+
       try {
         const url = new URL(req.url!, `http://localhost:${REDIRECT_PORT}`);
 
@@ -127,9 +133,18 @@ export async function startNotionOAuth(
         }
 
         const data = (await tokenRes.json()) as {
-          access_token: string;
-          workspace_name: string;
+          access_token?: string;
+          workspace_name?: string;
         };
+
+        if (!data.access_token) {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(
+            "<h1>Authorization failed.</h1><p>No access token received. You can close this tab.</p>",
+          );
+          safeReject(new Error("Notion OAuth response missing access_token"));
+          return;
+        }
 
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(
@@ -138,7 +153,7 @@ export async function startNotionOAuth(
 
         safeResolve({
           accessToken: data.access_token,
-          workspaceName: data.workspace_name,
+          workspaceName: data.workspace_name ?? "",
         });
       } catch (err) {
         res.writeHead(500);

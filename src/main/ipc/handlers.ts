@@ -29,6 +29,8 @@ import { listDriveItems } from "../connectors/drive";
 import { getEmbeddingModelName } from "../search/embedder";
 import type { EmbedConfig } from "../search/embedder";
 import type { SourceConfig } from "../../shared/types";
+import { activeSyncs, cancelAllSyncs, buildEmbedConfig } from "./sync-handlers";
+import { syncScheduler } from "../sync/scheduler";
 
 const ALLOWED_SECRET_KEYS = new Set([
   "cohere_api_key",
@@ -64,6 +66,12 @@ export function registerIpcHandlers(): void {
     deleteSecret(getDb(), key);
   });
 
+  ipcMain.handle("secrets:has", (_, key: string) => {
+    if (!ALLOWED_SECRET_KEYS.has(key))
+      throw new Error(`Unknown secret key: ${key}`);
+    return loadSecret(getDb(), key) !== null;
+  });
+
   ipcMain.handle("auth:validate-cohere", async (_, apiKey: string) => {
     try {
       const res = await fetch("https://api.cohere.com/v2/embed", {
@@ -95,7 +103,7 @@ export function registerIpcHandlers(): void {
       const data = (await res.json()) as { models?: { name: string }[] };
       return { available: true, models: data.models?.map((m) => m.name) ?? [] };
     } catch {
-      return { valid: false, models: [] };
+      return { available: false, models: [] };
     }
   });
 
@@ -104,6 +112,9 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("settings:set-embedding-provider", (_, provider: string) => {
+    if (provider !== "cohere" && provider !== "ollama") {
+      throw new Error(`Invalid embedding provider: ${provider}`);
+    }
     upsertSetting(getDb(), "embedding_provider", provider);
   });
 
@@ -129,11 +140,11 @@ export function registerIpcHandlers(): void {
     cancelNotionOAuth();
   });
 
-  ipcMain.handle("notion:list-pages", async (_, parentPageId?: string) => {
+  ipcMain.handle("notion:list-pages", async () => {
     const token = loadSecret(getDb(), "notion_token");
     if (!token)
       throw new Error("Notion is not connected. Please authenticate first.");
-    return listNotionItems(token, parentPageId);
+    return listNotionItems(token);
   });
 
   ipcMain.handle("auth:google-oauth-start", async () => {
@@ -168,17 +179,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle("search:query", async (_, query: string) => {
     const db = getDb();
-    const provider = (getSetting(db, "embedding_provider") ?? "cohere") as
-      | "cohere"
-      | "ollama";
-
-    const embedConfig: EmbedConfig = {
-      provider,
-      apiKey: loadSecret(db, "cohere_api_key") ?? undefined,
-      ollamaModel: getSetting(db, "ollama_model") ?? undefined,
-    };
-
-    return search(db, query, embedConfig);
+    return search(db, query, buildEmbedConfig(db));
   });
 
   ipcMain.handle("sources:list", () => {
@@ -230,6 +231,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("sources:remove", (_, id: string) => {
+    activeSyncs.get(id)?.abort();
     deleteSource(getDb(), id);
   });
 
@@ -247,6 +249,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("app:clear-all-data", () => {
+    cancelAllSyncs();
     clearAllData(getDb());
   });
 
@@ -273,5 +276,17 @@ export function registerIpcHandlers(): void {
       mismatchedChunks,
       totalChunks: health.totalChunks,
     };
+  });
+
+  ipcMain.handle("settings:get-auto-sync", () => {
+    return syncScheduler.getState();
+  });
+
+  ipcMain.handle("settings:set-auto-sync-enabled", async (_, enabled: boolean) => {
+    await syncScheduler.setEnabled(enabled);
+  });
+
+  ipcMain.handle("settings:set-auto-sync-interval", (_, ms: number) => {
+    syncScheduler.setIntervalMs(ms);
   });
 }

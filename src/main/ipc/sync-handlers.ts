@@ -9,9 +9,9 @@ import { DriveConnector } from "../connectors/drive";
 import { getAuthenticatedClient, refreshIfNeeded } from "../auth/google-oauth";
 import type { EmbedConfig } from "../search/embedder";
 
-const activeSyncs = new Map<string, AbortController>();
+export const activeSyncs = new Map<string, AbortController>();
 
-function buildEmbedConfig(db: ReturnType<typeof getDb>): EmbedConfig {
+export function buildEmbedConfig(db: ReturnType<typeof getDb>): EmbedConfig {
   const provider = (getSetting(db, "embedding_provider") ?? "cohere") as
     | "cohere"
     | "ollama";
@@ -25,7 +25,7 @@ function buildEmbedConfig(db: ReturnType<typeof getDb>): EmbedConfig {
   return config;
 }
 
-async function getConnectorForSource(
+export async function getConnectorForSource(
   db: ReturnType<typeof getDb>,
   source: { provider: string; rootExternalId: string },
 ): Promise<Connector> {
@@ -73,10 +73,10 @@ export function registerSyncHandlers(): void {
     }
 
     const controller = new AbortController();
+    activeSyncs.set(sourceId, controller);
 
     try {
       const connector = await getConnectorForSource(db, source);
-      activeSyncs.set(sourceId, controller);
       const embedConfig = buildEmbedConfig(db);
       const sender: WebContents = event.sender;
 
@@ -104,7 +104,6 @@ export function registerSyncHandlers(): void {
     const controller = activeSyncs.get(sourceId);
     if (controller) {
       controller.abort();
-      activeSyncs.delete(sourceId);
     }
   });
 }

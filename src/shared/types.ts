@@ -51,6 +51,7 @@ export interface SyncProgress {
   sourceId: string;
   phase: "fetching" | "chunking" | "embedding" | "storing" | "done" | "error";
   current: number;
+  skipped: number;
   total: number;
   currentDocTitle: string | null;
   errors: string[];
@@ -72,7 +73,9 @@ export interface StorageStats {
 
 export type SourceWithCount = Source & { documentCount: number };
 
-export type SourceConfig = { provider: "notion"; rootPageId: string; name: string } | { provider: "google_drive"; folderId: string; folderName: string };
+export type SourceConfig =
+  | { provider: "notion"; rootPageId: string; name: string }
+  | { provider: "google_drive"; folderId: string; folderName: string };
 
 export interface DriveItemSummary {
   id: string;
@@ -84,4 +87,5 @@ export interface NotionItemSummary {
   id: string;
   title: string;
   icon: string | null;
+  isDatabase?: boolean;
 }

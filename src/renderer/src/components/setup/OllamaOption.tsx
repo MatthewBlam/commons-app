@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@renderer/components/ui/button";
 import { ErrorBanner } from "@renderer/components/ui/error-banner";
 
@@ -11,7 +11,7 @@ export function OllamaOption({ onSuccess }: OllamaOptionProps): React.JSX.Elemen
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const checkOllama = useCallback(async (): Promise<void> => {
+  async function checkOllama(): Promise<void> {
     setStatus("checking");
     setError(null);
     try {
@@ -25,17 +25,29 @@ export function OllamaOption({ onSuccess }: OllamaOptionProps): React.JSX.Elemen
     } catch {
       setError("Failed to check Ollama status.");
     }
-  }, []);
+  }
 
   useEffect(() => {
     let ignore = false;
-    checkOllama().then(() => {
-      if (ignore) return;
-    });
+    (async () => {
+      try {
+        const result = await window.api.checkOllama();
+        if (ignore) return;
+        if (result.available) {
+          setStatus("available");
+          setModels(result.models);
+        } else {
+          setStatus("unavailable");
+        }
+      } catch {
+        if (ignore) return;
+        setError("Failed to check Ollama status.");
+      }
+    })();
     return () => {
       ignore = true;
     };
-  }, [checkOllama]);
+  }, []);
 
   async function handleSelect(): Promise<void> {
     try {

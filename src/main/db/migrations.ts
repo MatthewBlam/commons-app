@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { copyFileSync } from "node:fs";
 
 interface Migration {
   version: number;
@@ -80,7 +81,7 @@ const migrations: Migration[] = [
   },
 ];
 
-export function runMigrations(db: Database.Database): void {
+export function runMigrations(db: Database.Database, dbPath?: string): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
@@ -95,6 +96,14 @@ export function runMigrations(db: Database.Database): void {
 
   const pending = migrations.filter((m) => m.version > currentVersion);
   if (pending.length === 0) return;
+
+  if (dbPath) {
+    try {
+      copyFileSync(dbPath, `${dbPath}.pre-migration.bak`);
+    } catch {
+      // non-fatal — best-effort backup
+    }
+  }
 
   for (const migration of pending) {
     console.log(`Applying migration v${migration.version}...`);

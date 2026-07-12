@@ -32,10 +32,12 @@ function DragRegion({ className }: { className?: string }): React.JSX.Element {
       el.releasePointerCapture(e.pointerId);
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("lostpointercapture", onUp);
       window.electronDrag.stopDrag();
     };
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerup", onUp);
+    el.addEventListener("lostpointercapture", onUp);
   }, []);
 
   return <div className={className} onPointerDown={handlePointerDown} />;
@@ -75,11 +77,14 @@ function App(): React.JSX.Element {
           return;
         }
         const key = await window.api.loadSecret("cohere_api_key");
-        setReady(key !== null);
+        const isReady = key !== null;
+        setReady(isReady);
+        if (!isReady) setVisited(new Set(["search"]));
       })
       .catch((err) => {
         console.error("Failed to check embedding provider:", err);
         setReady(false);
+        setVisited(new Set(["search"]));
       });
   }, []);
 
@@ -162,12 +167,16 @@ function App(): React.JSX.Element {
             <div style={{ display: page === "search" ? undefined : "none" }}>
               <SearchPage visible={page === "search"} />
             </div>
-            {visited.has("sources") && (
+          </ErrorBoundary>
+          {visited.has("sources") && (
+            <ErrorBoundary>
               <div style={{ display: page === "sources" ? undefined : "none" }}>
                 <SourcesPage visible={page === "sources"} />
               </div>
-            )}
-            {visited.has("settings") && (
+            </ErrorBoundary>
+          )}
+          {visited.has("settings") && (
+            <ErrorBoundary>
               <div style={{ display: page === "settings" ? undefined : "none" }}>
                 <SettingsPage
                   visible={page === "settings"}
@@ -176,8 +185,8 @@ function App(): React.JSX.Element {
                   onProviderReset={handleProviderReset}
                 />
               </div>
-            )}
-          </ErrorBoundary>
+            </ErrorBoundary>
+          )}
         </main>
       </div>
     </div>

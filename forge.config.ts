@@ -12,17 +12,11 @@ const config: ForgeConfig = {
       unpackDir: "resources",
     },
     osxSign: {
+      identity: "-",
       optionsForFile: () => ({
         entitlements: "./build/entitlements.mac.plist",
       }),
     },
-    osxNotarize: process.env.APPLE_ID
-      ? {
-          appleId: process.env.APPLE_ID,
-          appleIdPassword: process.env.APPLE_APP_SPECIFIC_PASSWORD!,
-          teamId: process.env.APPLE_TEAM_ID!,
-        }
-      : undefined,
     extendInfo: {
       NSDocumentsFolderUsageDescription:
         "Application requests access to the user's Documents folder.",

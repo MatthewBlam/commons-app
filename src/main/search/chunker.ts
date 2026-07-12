@@ -56,7 +56,7 @@ function splitOnParagraphs(
 }
 
 function splitAtSentences(text: string): string[] {
-  return text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  return text.split(/(?<=[.!?])\s+(?=[A-ZÀ-ɏ"])/).filter(Boolean);
 }
 
 function splitOversizedSection(
@@ -72,6 +72,44 @@ function splitOversizedSection(
 
   for (const sentence of sentences) {
     const sentenceTokens = estimateTokens(sentence);
+
+    if (sentenceTokens > MAX_TOKENS) {
+      if (current.length > 0) {
+        const chunkText = current.join(" ");
+        chunks.push({
+          index: idx++,
+          heading,
+          text: chunkText,
+          tokenCount: estimateTokens(chunkText),
+        });
+        current = [];
+        currentTokens = 0;
+      }
+      const words = sentence.split(/\s+/);
+      let wordBuf: string[] = [];
+      let wordTokens = 0;
+      for (const word of words) {
+        const wt = estimateTokens(word);
+        if (wordTokens + wt > MAX_TOKENS && wordBuf.length > 0) {
+          const chunkText = wordBuf.join(" ");
+          chunks.push({
+            index: idx++,
+            heading,
+            text: chunkText,
+            tokenCount: estimateTokens(chunkText),
+          });
+          wordBuf = [];
+          wordTokens = 0;
+        }
+        wordBuf.push(word);
+        wordTokens += wt;
+      }
+      if (wordBuf.length > 0) {
+        current = wordBuf;
+        currentTokens = wordTokens;
+      }
+      continue;
+    }
 
     if (currentTokens + sentenceTokens > MAX_TOKENS && current.length > 0) {
       const chunkText = current.join(" ");

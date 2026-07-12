@@ -267,7 +267,7 @@ describe("embedDocuments", () => {
   });
 
   it("throws on Ollama API error", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce({
+    vi.mocked(fetch).mockResolvedValue({
       ok: false,
       status: 500,
       statusText: "Internal Server Error",
@@ -276,7 +276,8 @@ describe("embedDocuments", () => {
     await expect(embedDocuments(["text"], ollamaConfig)).rejects.toThrow(
       "Ollama embed failed: 500 Internal Server Error",
     );
-  });
+    expect(fetch).toHaveBeenCalledTimes(4);
+  }, 15_000);
 });
 
 describe("embedQuery", () => {
